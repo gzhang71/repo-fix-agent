@@ -152,6 +152,7 @@ def test_context_manager(repo):
 
 def test_auto_falls_back_to_local(repo, monkeypatch, caplog):
     monkeypatch.setattr(sb, "_docker_available", lambda: False)
+    monkeypatch.setattr(sb, "_warned_fallback", False)  # warn-once flag may be set by earlier tests
     with make_sandbox(str(repo), backend="auto") as s:
         assert isinstance(s, LocalSandbox)
     assert any("falling back" in r.message for r in caplog.records)

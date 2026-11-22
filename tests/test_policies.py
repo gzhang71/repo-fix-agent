@@ -74,3 +74,16 @@ def test_routing():
     import pytest
     with pytest.raises(ValueError):
         make_policy("llama")
+
+
+def test_preload_then_act_continues_from_last_observation():
+    demo = load_demos("data/demos/seed.jsonl")[0]
+    client = FakeClient([_tool_msg("submit", {}, "done", "c9")])
+    p = LocalModelPolicy(StudentServingConfig(), client=client)
+    p.reset("sys", "task")
+    p.preload(demo.trajectory[:3])
+    _, action = p.act(demo.trajectory[2].observation)
+    assert action.tool == "submit"
+    msgs = client.requests[0]["messages"]
+    assert [m["role"] for m in msgs] == ["system", "user"] + ["assistant", "tool"] * 3
+    assert msgs[-1]["content"] == demo.trajectory[2].observation

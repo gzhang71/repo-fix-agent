@@ -41,9 +41,12 @@ issue + repo ──► RepoEnv (sandbox copy, baseline commit)
   agent can't see or edit the tests it's graded on. Edits under `tests/` are left out of the
   submitted patch.
 * **Sandbox** (`sandbox.py`): `backend="docker"` runs each episode in its own container
-  (`--network none`, memory/pid/CPU limits, `no-new-privileges`); `backend="local"` is a temp-dir
-  copy for development and is **not** a security boundary (no network isolation). `auto` picks
-  docker when available. Timeouts kill the whole process group.
+  (`--network none`, memory/pid/CPU limits, `no-new-privileges`, host uid) from the image in
+  `docker/sandbox.Dockerfile` (git + pytest baked in, since the container has no network);
+  `backend="local"` is a temp-dir copy for development and is **not** a security boundary (no
+  network isolation). `auto` picks docker when the daemon is up and the image exists, otherwise
+  falls back with a warning; `--sandbox` / `REPOFIX_SANDBOX` force a backend. Timeouts kill the
+  whole process group. All 100 seed instances validate inside the container.
 * **Student serving:** `LocalModelPolicy` talks to a vLLM/SGLang OpenAI-compatible server with
   native tool calling. When the conversation exceeds the context window set in
   `configs/models.yaml`, the oldest tool outputs are elided first.
@@ -87,25 +90,29 @@ training a model on its outputs. If it doesn't, use one of the open-weight teach
 
 ## 5. Seed dataset (this repo)
 
-`data/demos/seed.jsonl`: 10 validated instances, each a small Python repo under `data/repos/`:
+`data/demos/seed.jsonl`: **100 validated instances**, each a small Python repo under `data/repos/`,
+built from `scripts/seed_specs/batch_*.py` by `scripts/build_seed_dataset.py`:
 
-| id | bug type | difficulty |
+| batch | ids | theme |
 |---|---|---|
-| seed-001 pagination offset | off-by-one | easy |
-| seed-002 mutable default tags | mutable default argument | easy |
-| seed-003 leap year century | logic error | easy |
-| seed-004 mean integer division | wrong operator | easy |
-| seed-005 config partial override | missing default merge (multi-file trace) | medium |
-| seed-006 slugify case | normalization | easy |
-| seed-007 binary search bounds | loop bound | medium |
-| seed-008 report date range | off-by-one across modules | medium |
-| seed-009 retry swallows exception | error handling | medium |
-| seed-010 LRU get doesn't refresh | state update | medium |
+| 00 | 001-010 | original hand-written set |
+| 01 | 011-025 | text processing & parsing |
+| 02 | 026-040 | data structures & algorithms |
+| 03 | 041-055 | dates, numbers, money, units |
+| 04 | 056-070 | Python object model, iterators, decorators |
+| 05 | 071-085 | config, CLI, serialization, paths, caching |
+| 06 | 086-100 | multi-module business logic (hardest) |
+
+Mix: 32 easy / 47 medium / 21 hard; 5-13 steps per trajectory (mean 7.9). The fix spans 2 files
+in 4 instances; in about 60 the bug lives in a different module from where the symptom shows. A
+few trajectories start on a wrong hypothesis and correct course. The builder rejects a spec whose
+steps error, whose existing tests fail on the buggy repo, or where no hidden test fails.
 
 These are deliberately small, to exercise the pipeline end to end. They are **not** a benchmark:
 real eval instances should come from the engineer demos on your own repos.
 
-Detailed options for using the demo data: [DEMO_DATA_PROPOSALS.md](DEMO_DATA_PROPOSALS.md).
+Detailed options for using the demo data: [DEMO_DATA_PROPOSALS.md](DEMO_DATA_PROPOSALS.md). Each proposal
+is implemented as a module in `src/repo_fix_agent/pipeline/` (map in §7 of that doc).
 
 ## 6. Next steps
 1. Convert a 200-demo sample of the engineer data → validate → measure the drop rate.

@@ -13,13 +13,14 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Protocol
 
-from .schema import Action
+from .schema import Action, Step
 from .tools import TOOLS
 
 
 class Policy(Protocol):
     def reset(self, system: str, task: str) -> None: ...
     def act(self, last_observation: str | None) -> tuple[str, Action]: ...
+    def preload(self, steps: list[Step]) -> None: ...  # optional: seed already-executed steps
 
 
 class ScriptedPolicy:
@@ -28,6 +29,9 @@ class ScriptedPolicy:
 
     def reset(self, system: str, task: str) -> None:
         self._i = 0
+
+    def preload(self, steps: list[Step]) -> None:
+        """Prefix already executed by the caller; scripted policies just continue their script."""
 
     def act(self, last_observation: str | None) -> tuple[str, Action]:
         if self._i >= len(self._steps):
@@ -55,6 +59,19 @@ class AnthropicPolicy:
         self.system = system
         self.messages: list[dict] = [{"role": "user", "content": task}]
         self._pending_tool_id: str | None = None
+
+    def preload(self, steps: list[Step]) -> None:
+        """Seed history with already-executed steps (RL prefix-conditioned rollouts, §3g).
+        Call right after reset(); the next act() continues from the last observation."""
+        for i, st in enumerate(steps):
+            if self._pending_tool_id is not None:
+                self.messages.append({"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": self._pending_tool_id, "content": prev_obs}]})
+            tid = f"prefix_{i}"
+            content = ([{"type": "text", "text": st.thought}] if st.thought else []) + [
+                {"type": "tool_use", "id": tid, "name": st.action.tool, "input": st.action.args}]
+            self.messages.append({"role": "assistant", "content": content})
+            self._pending_tool_id, prev_obs = tid, st.observation
 
     def _call(self):
         resp = self.client.beta.messages.create(
@@ -124,6 +141,18 @@ class _ChatCompletionsPolicy:
 
     def _prepare_messages(self) -> list[dict]:
         return self.messages  # hook: LocalModelPolicy trims to the context budget
+
+    def preload(self, steps: list[Step]) -> None:
+        """Seed history with already-executed steps (RL prefix-conditioned rollouts, §3g).
+        Same message shape as sft.render_messages. Call right after reset()."""
+        for i, st in enumerate(steps):
+            if self._pending_tool_id is not None:
+                self.messages.append({"role": "tool", "tool_call_id": self._pending_tool_id, "content": prev_obs})
+            tid = f"prefix_{i}"
+            self.messages.append({"role": "assistant", "content": st.thought, "tool_calls": [{
+                "id": tid, "type": "function",
+                "function": {"name": st.action.tool, "arguments": json.dumps(st.action.args)}}]})
+            self._pending_tool_id, prev_obs = tid, st.observation
 
     def act(self, last_observation: str | None) -> tuple[str, Action]:
         if self._pending_tool_id is not None:
@@ -220,25 +249,35 @@ class LocalModelPolicy(_ChatCompletionsPolicy):
                          {"max_tokens": self.cfg.max_new_tokens, "temperature": self.cfg.temperature})
 
     def _tokens(self, msgs: list[dict]) -> int:
-        chars = sum(len(m.get("content") or "") + len(json.dumps(m.get("tool_calls", ""))) for m in msgs)
-        chars += len(json.dumps(self.tools))
-        return int(chars / self.cfg.chars_per_token)
+        return estimate_tokens(msgs, self.tools, self.cfg.chars_per_token)
 
     def _prepare_messages(self) -> list[dict]:
-        budget = self.cfg.max_context_tokens - self.cfg.max_new_tokens
-        msgs = [dict(m) for m in self.messages]
-        tool_idx = [i for i, m in enumerate(msgs) if m["role"] == "tool"]
-        elidable = tool_idx[:-self.cfg.keep_recent_observations] if self.cfg.keep_recent_observations else tool_idx
-        for i in elidable:
-            if self._tokens(msgs) <= budget:
-                return msgs
-            msgs[i]["content"] = self.ELIDED
-        over = self._tokens(msgs) - budget
-        if over > 0 and tool_idx:
-            last = msgs[tool_idx[-1]]
-            keep = max(200, len(last["content"]) - int(over * self.cfg.chars_per_token) - 100)
-            last["content"] = "...[truncated to fit context]...\n" + last["content"][-keep:]
-        return msgs
+        return apply_context_budget(self.messages, self.tools, self.cfg)
+
+
+def estimate_tokens(msgs: list[dict], tools: list[dict], chars_per_token: float) -> int:
+    chars = sum(len(m.get("content") or "") + len(json.dumps(m.get("tool_calls", ""))) for m in msgs)
+    return int((chars + len(json.dumps(tools))) / chars_per_token)
+
+
+def apply_context_budget(messages: list[dict], tools: list[dict], cfg: StudentServingConfig) -> list[dict]:
+    """The ONE truncation policy shared by inference (LocalModelPolicy) and SFT data building, so
+    training contexts match deployment exactly. Returns a trimmed copy; input is not modified."""
+    budget = cfg.max_context_tokens - cfg.max_new_tokens
+    msgs = [dict(m) for m in messages]
+    tok = lambda: estimate_tokens(msgs, tools, cfg.chars_per_token)  # noqa: E731
+    tool_idx = [i for i, m in enumerate(msgs) if m["role"] == "tool"]
+    elidable = tool_idx[:-cfg.keep_recent_observations] if cfg.keep_recent_observations else tool_idx
+    for i in elidable:
+        if tok() <= budget:
+            return msgs
+        msgs[i]["content"] = LocalModelPolicy.ELIDED
+    over = tok() - budget
+    if over > 0 and tool_idx:
+        last = msgs[tool_idx[-1]]
+        keep = max(200, len(last["content"]) - int(over * cfg.chars_per_token) - 100)
+        last["content"] = "...[truncated to fit context]...\n" + last["content"][-keep:]
+    return msgs
 
 
 def make_policy(model: str) -> Policy:

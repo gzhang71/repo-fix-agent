@@ -8,7 +8,9 @@ and checked out at ``base_commit``). The copy is re-initialised as a fresh git r
 are not reachable from inside the sandbox, and ``git diff <baseline>`` yields the agent's patch.
 
 * ``DockerSandbox`` (production): a long-lived container with ``--network none``, memory, pids
-  and CPU limits, ``no-new-privileges``; commands run via ``docker exec ... bash -lc`` and the
+  and CPU limits, ``no-new-privileges``, running as the host uid; image built from
+  ``docker/sandbox.Dockerfile`` (git + pytest baked in, since the container has no network);
+  commands run via ``docker exec ... bash -lc`` and the
   timeout is enforced host-side (on timeout every process in the container except PID 1 is
   killed). File I/O goes through the host-side bind-mounted copy with path-escape checks.
 * ``LocalSandbox`` (development only): a temp-dir copy, commands run as the *current user* with
@@ -19,9 +21,15 @@ are not reachable from inside the sandbox, and ``git diff <baseline>`` yields th
 
 All subprocesses are spawned with argv lists; the agent's command is only ever interpreted by a
 shell running *inside* the sandbox (cwd = repo root).
+
+Selection: ``make_sandbox(backend="auto")`` uses docker when the daemon is up *and* the sandbox
+image exists, otherwise falls back to local with a warning. ``REPOFIX_SANDBOX`` (auto|docker|local)
+and ``REPOFIX_SANDBOX_IMAGE`` override the defaults process-wide (the CLI's ``--sandbox`` and
+``--sandbox-image`` flags set them).
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
@@ -37,6 +45,8 @@ log = logging.getLogger(__name__)
 IGNORE = (".git", "__pycache__", ".pytest_cache", ".venv", "node_modules")
 GIT_ID = ["-c", "user.name=agent", "-c", "user.email=agent@local", "-c", "commit.gpgsign=false"]
 TRUNC_PREFIX = "...[truncated]...\n"
+DEFAULT_IMAGE = "repo-fix-sandbox:py3.12"
+BUILD_HINT = "docker build -f docker/sandbox.Dockerfile -t repo-fix-sandbox:py3.12 docker"
 
 
 @dataclass
@@ -160,6 +170,7 @@ class _Base:
 
 # ---- local backend ---------------------------------------------------------------------------
 _warned_network = False
+_warned_fallback = False
 
 
 class LocalSandbox(_Base):
@@ -218,8 +229,11 @@ class LocalSandbox(_Base):
 CONTAINER_ROOT = "/workspace/repo"
 
 
-def _docker_run_args(host_repo: str, image: str, limits: SandboxLimits) -> list[str]:
+def _docker_run_args(host_repo: str, image: str, limits: SandboxLimits,
+                     user: str | None = None) -> list[str]:
     args = ["docker", "run", "-d", "--rm"]
+    if user:
+        args += ["--user", user]
     if not limits.network:
         args += ["--network", "none"]
     args += ["--memory", f"{limits.memory_mb}m", "--pids-limit", str(limits.max_procs),
@@ -231,6 +245,7 @@ def _docker_run_args(host_repo: str, image: str, limits: SandboxLimits) -> list[
     return args
 
 
+@functools.lru_cache(maxsize=1)
 def _docker_available() -> bool:
     try:
         return subprocess.run(["docker", "info"], capture_output=True, timeout=15).returncode == 0
@@ -238,21 +253,42 @@ def _docker_available() -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=8)
+def _image_available(image: str) -> bool:
+    try:
+        return subprocess.run(["docker", "image", "inspect", image], capture_output=True,
+                              timeout=15).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _host_user() -> str | None:
+    """Run as the host uid:gid so files written into the bind mount stay deletable by the host."""
+    return f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else None
+
+
+def default_image() -> str:
+    return os.environ.get("REPOFIX_SANDBOX_IMAGE") or DEFAULT_IMAGE
+
+
 class DockerSandbox(_Base):
     root = CONTAINER_ROOT
 
     def __init__(self, repo: str, base_commit: str | None = None,
-                 limits: SandboxLimits | None = None, image: str = "python:3.12"):
+                 limits: SandboxLimits | None = None, image: str | None = None):
         self.limits = limits or SandboxLimits()
+        image = image or default_image()
         self.container: str | None = None
         self._tmp: str | None = tempfile.mkdtemp(prefix="repofix-")
         try:
             self._files_root = os.path.join(self._tmp, "repo")
             self.baseline = _prepare_repo(str(repo), base_commit, self._files_root)
-            r = subprocess.run(_docker_run_args(self._files_root, image, self.limits),
+            r = subprocess.run(_docker_run_args(self._files_root, image, self.limits, _host_user()),
                                capture_output=True, text=True, timeout=300)
             if r.returncode != 0:
-                raise RuntimeError(f"docker run failed: {r.stderr.strip()}")
+                hint = f" (build it with: {BUILD_HINT})" if "No such image" in r.stderr or \
+                    "pull access denied" in r.stderr else ""
+                raise RuntimeError(f"docker run failed: {r.stderr.strip()}{hint}")
             self.container = r.stdout.strip()
         except BaseException:
             self.close()
@@ -283,11 +319,21 @@ class DockerSandbox(_Base):
 
 # ---- factory ---------------------------------------------------------------------------------
 def make_sandbox(repo: str, base_commit: str | None = None, backend: str = "auto",
-                 limits: SandboxLimits | None = None, image: str = "python:3.12") -> Sandbox:
+                 limits: SandboxLimits | None = None, image: str | None = None) -> Sandbox:
+    image = image or default_image()
     if backend == "auto":
-        backend = "docker" if _docker_available() else "local"
-        if backend == "local":
-            log.warning("docker unavailable; falling back to the local (development-only) sandbox")
+        backend = os.environ.get("REPOFIX_SANDBOX") or "auto"
+    if backend == "auto":
+        global _warned_fallback
+        if not _docker_available():
+            backend, why = "local", "docker unavailable"
+        elif not _image_available(image):
+            backend, why = "local", f"sandbox image {image!r} not found (build it with: {BUILD_HINT})"
+        else:
+            backend, why = "docker", ""
+        if backend == "local" and not _warned_fallback:
+            log.warning("%s; falling back to the local (development-only) sandbox", why)
+            _warned_fallback = True
     if backend == "docker":
         return DockerSandbox(repo, base_commit, limits, image)
     if backend == "local":

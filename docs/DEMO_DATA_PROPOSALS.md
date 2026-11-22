@@ -300,3 +300,55 @@ week 2; if the "30%/60%" doesn't reproduce in our scaffold, shift all targets ac
 7. **Budget:** token budget for teacher rollouts and GPU budget for RL. The phase 1 pilot will give $/resolved to size this.
 8. **Latency / cost envelope at inference:** is best-of-n (n× student calls) acceptable?
 9. **Engineer time** for the 100-200 instance human-reviewed eval slice: who owns it?
+
+---
+
+## 7. Implementation status
+
+Every proposal has a module in `src/repo_fix_agent/pipeline/` and a `repo-fix` command. All model
+calls go through injected policies / `llm.TextLLM`, so each step is tested offline.
+
+| Section | Module | Command(s) | Status |
+|---|---|---|---|
+| §2.1 audit | `audit.py` | `audit` | validate xN + flakiness, replay, exact dedup, MinHash near-dup + optional semantic dedup (`--embedder`), leakage, secrets/PII (provider patterns + entropy, optional detect-secrets) with redaction, sizes, optional LLM bug-type & sufficiency labels |
+| §2.2 split, §3j eval | `split.py` | `split`, `eval-set` | repo-level split with near-dup clusters kept together, stratified; frozen test manifest (content-hashed) + `assert_disjoint` guard; human-review sampler |
+| §3a SFT | `sft_data.py` | `sft-mix` | shared `apply_context_budget` with inference, loss masks, thought backfill with leak check, no-op collapse (replay-verified), prompt consistency check |
+| §3b/3c distillation | `distill.py` | `distill`, `mix` | k-sample rejection sampling, 4-level hint ladder, hint-leakage filter, dedup + per-instance cap, teacher:engineer mixing; `--workers` for concurrent episodes |
+| §3d aux tasks | `aux_tasks.py` | `aux-tasks` | localization, patch-gen, test-writing, repro, critique, each with an execution verifier |
+| §3e preferences | `preferences.py` | `prefs` | trajectory / patch / step-level DPO pairs, KTO labels, length-bias guard |
+| §3f verifier | `verifier.py` | `verifier-train`, `best-of-n` | feature logistic-regression + LLM judge; best-of-n with patch voting (`--workers`); AUROC |
+| §3g RL | `rl.py` | `rl-rollouts` | gym-style env, reward with step/format/test-infra penalties, GRPO/RLOO advantages, pass@k curriculum, prefix-conditioned rollouts, `--workers`; exports batches for an external trainer |
+| §3h augmentation | `augment.py`, `repro.py` | `augment` | AST bug injection (10 operators); issues written from an *executed* reproduction (buggy vs fixed output, no test code quoted), LLM writer grounded on the same repro; audit leak check on every issue; rephrasing, repo perturbation; every output validated |
+| §3i retrieval | `retrieval.py`, `embed.py` | `retrieval-index`, `retrieve` | hybrid TF-IDF + embedding index (`--embedder st:MODEL \| voyage:MODEL \| openai:MODEL`), same-repo boost |
+
+Not implemented here (needs your infra): the actual SFT/DPO/RL training runs (outputs are in
+TRL-compatible JSONL).
+
+### 7.1 Resolved limitations (measured on this repo)
+
+| Former limitation | Fix | Evidence |
+|---|---|---|
+| Docker sandbox never run | `docker/sandbox.Dockerfile` (git + pytest; the container has no network), host-uid user, `auto` checks daemon **and** image, `--sandbox` / `REPOFIX_SANDBOX` | Docker e2e test passes (no network, timeout kill, path escapes); all 100 seeds validate inside the container |
+| Thin, template issue text offline | `repro.py`: turn the failing test into a standalone repro, run it on the buggy and fixed tree, write the issue from real outputs + docstring intent; final audit leak check | Old template: 34/146 issues quoted hidden assertions. New: 0 leaks, issues ~2x longer with runnable repros |
+| Retrieval/near-dup matched words only | `embed.py` backends; hybrid retrieval; semantic dedup embeds issue and fix **separately** | Paraphrased queries (`scripts/eval_retrieval_paraphrase.py`): TF-IDF top-1 3/10, MRR 0.47; `st:BAAI/bge-small-en-v1.5` top-1 8/10, top-3 10/10, MRR 0.88. A renamed-variable copy of a fix with a reworded issue: exact dedup and MinHash miss it, semantic dedup catches it (0.99 vs 0.95 for the closest genuinely different pair) with 0 false pairs on the 100 seeds |
+| Secret scanner regex-only | provider patterns (Anthropic, OpenAI, Google, Stripe, GitHub/GitLab, HF, npm, SendGrid, JWT, URL credentials), entropy detector (hex only with secret context, so git SHAs don't fire), fixture-email / version-string allowlist, optional detect-secrets | The old scanner flagged 8 seeds (all fixture emails like `ann@x.io` and the version `1.4.2.1`); now 0 false positives on 246 instances with builtin or detect-secrets |
+| Rollouts sequential | `parallel.pmap` (ordered thread pool; separate instance/episode pools) in distill, RL, best-of-n | `--workers N`; parallel output is identical to sequential under scripted policies (tested) |
+
+Remaining honest caveats: the offline `hash` embedder is lexical and did *not* beat TF-IDF on
+paraphrases (MRR 0.40), so use a real model (`pip install -e '.[embed]'`) for semantic
+matching; repros only cover tests that run standalone (no fixtures / parametrize / test-module
+helper functions), the rest fall back to the (now leak-free) template or `--issue-model`;
+`augment`'s own mutation scan still runs pytest on the host, not in the sandbox (it only
+executes code from your own seed repos).
+
+Typical flow:
+```
+repo-fix audit data/demos/seed.jsonl --out runs/validated.jsonl --report runs/audit.md
+repo-fix split runs/validated.jsonl --out-dir runs/splits
+M=runs/splits/frozen_test.manifest.json
+repo-fix distill runs/splits/train.jsonl --model claude-opus-5-5 --hints --exclude-ids $M \
+    --out-resolved runs/teacher.jsonl --out-failed runs/teacher_failed.jsonl
+repo-fix sft-mix --engineer runs/splits/train.jsonl --teacher runs/teacher.jsonl --out runs/sft.jsonl --exclude-ids $M
+repo-fix augment runs/splits/train.jsonl --out runs/synthetic.jsonl --issue-model claude-opus-5-5 --exclude-ids $M
+repo-fix eval runs/splits/test.jsonl --model student          # milestones only
+```

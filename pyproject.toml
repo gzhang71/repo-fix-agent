@@ -8,6 +8,9 @@ dependencies = ["pytest>=8"]
 [project.optional-dependencies]
 teacher = ["anthropic>=0.100"]
 openai = ["openai>=1.100"]
+embed = ["sentence-transformers>=3", "numpy>=1.26"]     # semantic retrieval + near-dup (st:MODEL)
+voyage = ["voyageai>=0.3", "numpy>=1.26"]               # voyage:voyage-code-3 embeddings
+secrets = ["detect-secrets>=1.5"]                       # audit --secret-scanner detect-secrets
 
 [project.scripts]
 repo-fix = "repo_fix_agent.cli:main"

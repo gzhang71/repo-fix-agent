@@ -4,11 +4,17 @@
   repo-fix validate data/demos/seed.jsonl                                     # dataset QA
   repo-fix eval     data/demos/seed.jsonl --model M                           # success rate
   repo-fix export-sft data/demos/seed.jsonl out.jsonl                         # training data
+
+Data pipeline (docs/DEMO_DATA_PROPOSALS.md): audit, split, eval-set, distill, mix, sft-mix,
+aux-tasks, prefs, verifier-train, best-of-n, rl-rollouts, retrieval-index, retrieve, augment.
+Run `repo-fix <command> -h` for options.
 """
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +25,10 @@ from .grader import grade, validate_instance
 from .policies import make_policy
 from .schema import load_demos
 from .sft import export_sft
+
+
+PIPELINE_MODULES = ["audit", "split", "distill", "sft_data", "aux_tasks", "preferences",
+                    "verifier", "rl", "retrieval", "augment"]
 
 
 def _policy(model: str):
@@ -69,6 +79,12 @@ def cmd_eval(a) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="repo-fix")
+    p.add_argument("--sandbox", choices=["auto", "docker", "local"], default=None,
+                   help="where agent commands and tests run (default: $REPOFIX_SANDBOX or auto = "
+                        "docker if the daemon and sandbox image are available, else local)")
+    p.add_argument("--sandbox-image", default=None,
+                   help="docker image for the sandbox (default: $REPOFIX_SANDBOX_IMAGE or "
+                        "repo-fix-sandbox:py3.12, built from docker/sandbox.Dockerfile)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     f = sub.add_parser("fix")
@@ -99,7 +115,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("out")
     s.set_defaults(fn=lambda a: print(f"wrote {export_sft(a.demos, a.out)} examples") or 0)
 
+    for name in PIPELINE_MODULES:  # docs/DEMO_DATA_PROPOSALS.md, one module per proposal
+        importlib.import_module(f".pipeline.{name}", __package__).register(sub)
+
     a = p.parse_args(argv)
+    if a.sandbox:  # read by make_sandbox(), so every command and pipeline step honours it
+        os.environ["REPOFIX_SANDBOX"] = a.sandbox
+    if a.sandbox_image:
+        os.environ["REPOFIX_SANDBOX_IMAGE"] = a.sandbox_image
     return a.fn(a)
 
 
