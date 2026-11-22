@@ -1,0 +1,63 @@
+# Candidate models. Every candidate is benchmarked on the SAME held-out split with the SAME
+# harness (repo_fix_agent.agent + grader) before we commit to one. Don't trust published
+# leaderboard numbers for selection; scaffold differences routinely move scores by 10-20 pts.
+#
+# Baselines from the problem statement:
+#   student (third-party pretrained) ~30% resolve rate
+#   teacher (powerful model)         ~60% resolve rate
+
+student:
+  # The model we fine-tune and deploy. Requirements: open weights we're licensed to fine-tune,
+  # native tool calling, >=64k context, cheap enough to serve per-repo.
+  baseline:
+    name: third-party-pretrained          # the existing ~30% model; keep as the control arm
+  candidates:
+    - name: Qwen/Qwen3-Coder-30B-A3B-Instruct
+      why: MoE (3B active), fast and cheap to serve; agentic/tool-call tuned; Apache-2.0
+    - name: mistralai/Devstral-Small-2507
+      why: 24B dense, built specifically for SWE agent scaffolds; Apache-2.0; fits one 80GB GPU for LoRA
+    - name: Qwen/Qwen2.5-Coder-32B-Instruct
+      why: most-studied base for SWE-agent distillation (SWE-Gym, SWE-smith); a known-good recipe to reproduce
+    - name: openai/gpt-oss-20b
+      why: small, permissive license (Apache-2.0), strong reasoning per parameter; good low-cost arm
+  serving:
+    # Read by LocalModelPolicy (`repo-fix eval ... --model student` or `student:<served-name>`).
+    base_url: http://localhost:8000/v1      # vLLM / SGLang OpenAI-compatible server
+    model_name: student                     # --served-model-name
+    api_key_env: STUDENT_API_KEY            # optional; "EMPTY" if unset
+    max_context_tokens: 65536               # set to the model's context window (= vLLM --max-model-len)
+    max_new_tokens: 4096                    # reserved per response
+    chars_per_token: 3.5                    # budgeting estimate; tune for the tokenizer
+    keep_recent_observations: 3             # older tool outputs are elided first when over budget
+    temperature: 0.0                        # 0 for eval; >0 for RL rollouts / best-of-n
+    # launch: vllm serve <weights> --served-model-name student --max-model-len 65536
+    #         --enable-auto-tool-choice --tool-call-parser <parser matching the model family>
+  finetune:
+    method: full-ft or LoRA r=64 on assistant tokens only
+    max_seq_len: 65536
+
+teacher:
+  # Generates trajectories for distillation and acts as the quality ceiling.
+  primary:
+    name: claude-opus-5-5
+    backend: anthropic
+    effort: high                          # sweep low/medium/high on the dev split; pick by cost per *resolved* instance
+  alternatives:
+    - name: gpt-5                         # ChatGPT family (OpenAI). Set to the newest GPT model on your account.
+      backend: openai
+      reasoning_effort: high
+      why: second strong teacher. Pooling resolved trajectories from two teacher families gives
+        more diverse solutions per issue and covers instances one teacher fails on.
+      note: verify OpenAI's terms allow training on outputs (same check as for Anthropic)
+  volume:
+    name: claude-sonnet-5-5               # cheaper arm for bulk rollouts if it holds quality on the dev split
+    backend: anthropic
+  open_weight_alternatives:
+    # Use if your API agreement doesn't allow training on model outputs, or for full provenance control.
+    - Qwen/Qwen3-Coder-480B-A35B-Instruct
+    - moonshotai/Kimi-K2-Instruct
+    - deepseek-ai/DeepSeek-V3.1
+  rollouts:
+    samples_per_instance: 4               # rejection sampling: keep only test-verified trajectories
+    max_steps: 40
+    temperature_note: "Opus 5.5 rejects sampling params; diversity comes from multiple samples"

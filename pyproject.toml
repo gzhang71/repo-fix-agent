@@ -1,0 +1,25 @@
+[project]
+name = "repo-fix-agent"
+version = "0.1.0"
+description = "Bug-fixing agent that plugs onto a repo, plus a teacher->student distillation pipeline"
+requires-python = ">=3.10"
+dependencies = ["pytest>=8"]
+
+[project.optional-dependencies]
+teacher = ["anthropic>=0.100"]
+openai = ["openai>=1.100"]
+
+[project.scripts]
+repo-fix = "repo_fix_agent.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+norecursedirs = ["data"]
