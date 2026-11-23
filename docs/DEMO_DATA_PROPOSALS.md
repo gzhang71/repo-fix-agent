@@ -321,8 +321,10 @@ calls go through injected policies / `llm.TextLLM`, so each step is tested offli
 | §3h augmentation | `augment.py`, `repro.py` | `augment` | AST bug injection (10 operators); issues written from an *executed* reproduction (buggy vs fixed output, no test code quoted), LLM writer grounded on the same repro; audit leak check on every issue; rephrasing, repo perturbation; every output validated |
 | §3i retrieval | `retrieval.py`, `embed.py` | `retrieval-index`, `retrieve` | hybrid TF-IDF + embedding index (`--embedder st:MODEL \| voyage:MODEL \| openai:MODEL`), same-repo boost |
 
-Not implemented here (needs your infra): the actual SFT/DPO/RL training runs (outputs are in
-TRL-compatible JSONL).
+Added since: `onpolicy-distill` (DAgger-style on-policy distillation), `export-chat-ft`,
+`fireworks-deploy`, `student-train` (round driver), and `scripts/train_lora.py` (SFT / DPO /
+GRPO-style policy gradient). Training itself runs on your GPUs or the Fireworks Training API;
+see CHANGELOG.md "Unreleased".
 
 ### 7.1 Resolved limitations (measured on this repo)
 

@@ -1,6 +1,7 @@
 """§3a SFT mix: engineer + teacher trajectories (+ aux tasks) rendered exactly like inference.
 
-* Rendering: `sft.render_messages` (same SYSTEM_PROMPT / build_task / tool schemas as serving), then
+* Rendering: `sft.render_messages` (the student's system prompt from its AgentOptions, build_task,
+  tool schemas and reasoning field exactly as served), then
   `policies.apply_context_budget` with the student's `StudentServingConfig`: the ONE truncation
   policy shared with `LocalModelPolicy`, so training contexts equal inference contexts.
 * Filters: engineer demos need `metadata.replay_ok` not False; teacher rollouts need
@@ -28,7 +29,7 @@ from types import SimpleNamespace as NS
 from typing import Any, Iterable
 
 from .. import sft
-from ..agent import SYSTEM_PROMPT, build_task, run_agent
+from ..agent import build_task, run_agent
 from ..env import RepoEnv
 from ..llm import TextLLM
 from ..policies import LocalModelPolicy, StudentServingConfig, apply_context_budget, estimate_tokens
@@ -141,7 +142,8 @@ def render_record(demo: Demo, cfg: StudentServingConfig | None = None, source: s
                   record_id: str | None = None) -> dict:
     cfg = cfg or StudentServingConfig()
     tools = sft.tools_as_functions()
-    messages = apply_context_budget(sft.render_messages(demo), tools, cfg)
+    messages = apply_context_budget(
+        sft.render_messages(demo, cfg.agent_options().system_prompt(), reasoning_field=cfg.keep_reasoning), tools, cfg)
     return {
         "id": record_id or demo.instance_id,
         "messages": messages,
@@ -407,8 +409,11 @@ def _counts(n_e: int, n_t: int, ratio: tuple[float, float]) -> tuple[int, int]:
 
 def build_sft_mix(engineer: list[Demo], teacher: list[Demo] | None = None, aux: list[dict] | None = None,
                   ratio: tuple[float, float] = (1, 3), aux_frac: float = 0.2, seed: int = 0,
-                  cfg: StudentServingConfig | None = None, exclude_ids: set[str] | None = None) -> list[dict]:
-    """ratio = (engineer, teacher) by trajectory count; aux capped at aux_frac of total tokens."""
+                  cfg: StudentServingConfig | None = None, exclude_ids: set[str] | None = None,
+                  edge_case_weight: float = 1.0) -> list[dict]:
+    """ratio = (engineer, teacher) by trajectory count; aux capped at aux_frac of total tokens.
+    `edge_case_weight` multiplies the loss weight of trajectories on instances whose hidden tests go
+    beyond the symptom in the issue (metadata.hidden_beyond_issue > 0, or several FAIL_TO_PASS)."""
     teacher, aux = teacher or [], aux or []
     check_excluded(engineer, exclude_ids, "engineer demos")
     check_excluded(teacher, exclude_ids, "teacher rollouts")
@@ -426,7 +431,12 @@ def build_sft_mix(engineer: list[Demo], teacher: list[Demo] | None = None, aux: 
         seen[rid] = seen.get(rid, 0) + 1
         if seen[rid] > 1:
             rid = f"{rid}#{seen[rid] - 1}"
-        records.append(render_record(d, cfg, d.metadata.get("source") or default_src, rid))
+        rec = render_record(d, cfg, d.metadata.get("source") or default_src, rid)
+        beyond = d.metadata.get("hidden_beyond_issue")
+        if edge_case_weight != 1.0 and ((beyond or 0) > 0 or (beyond is None and len(d.FAIL_TO_PASS) > 1)):
+            rec["weight"] *= edge_case_weight
+            rec["edge_case"] = True
+        records.append(rec)
 
     traj_tokens = sum(message_tokens(r["messages"]) for r in records)
     if aux and aux_frac > 0:
@@ -457,9 +467,10 @@ def mix_stats(records: list[dict]) -> dict:
 class _CaptureClient:
     """Fake OpenAI-compatible client: replays the demo's actions and records every request."""
 
-    def __init__(self, steps: list[Step]):
+    def __init__(self, steps: list[Step], reasoning: bool = False):
         self.requests: list[dict] = []
         self._steps = list(steps)
+        self._reasoning = reasoning   # answer like a reasoning model: thought in reasoning_content
         self.chat = NS(completions=NS(create=self._create))
 
     def _create(self, **kw):
@@ -467,7 +478,9 @@ class _CaptureClient:
         i = len(self.requests) - 1
         st = self._steps[i] if i < len(self._steps) else Step("", Action("submit", {}), "")
         tc = NS(id=f"call_{i}", function=NS(name=st.action.tool, arguments=json.dumps(st.action.args)))
-        return NS(model="consistency-check", choices=[NS(message=NS(content=st.thought, tool_calls=[tc]))])
+        msg = (NS(content="", reasoning_content=st.thought, tool_calls=[tc]) if self._reasoning
+               else NS(content=st.thought, tool_calls=[tc]))
+        return NS(model="consistency-check", choices=[NS(message=msg)])
 
 
 class _ReplayEnv:
@@ -496,16 +509,17 @@ def check_prompt_consistency(demo: Demo, cfg: StudentServingConfig | None = None
     Returns a list of mismatch descriptions; empty means train == inference."""
     cfg = cfg or StudentServingConfig()
     n = max(1, min(steps, len(demo.trajectory)))
-    client = _CaptureClient(demo.trajectory)
+    client = _CaptureClient(demo.trajectory, reasoning=cfg.keep_reasoning)
     run_agent(LocalModelPolicy(cfg, client=client), _ReplayEnv(demo.trajectory, n),
               demo.problem_statement, demo.test_cmd, max_steps=n)
-    rendered = sft.render_messages(demo)
+    rendered = sft.render_messages(demo, cfg.agent_options().system_prompt(), reasoning_field=cfg.keep_reasoning)
     tools = sft.tools_as_functions()
     problems = []
     if not client.requests:
         return ["policy sent no request"]
     first = client.requests[0]
-    if first["messages"][0] != {"role": "system", "content": SYSTEM_PROMPT} or rendered[0] != first["messages"][0]:
+    if first["messages"][0] != {"role": "system", "content": cfg.agent_options().system_prompt()} \
+            or rendered[0] != first["messages"][0]:
         problems.append("system prompt differs")
     if rendered[1] != first["messages"][1]:
         problems.append("user task differs")
@@ -528,7 +542,7 @@ def cmd_sft_mix(a) -> int:
     exclude = load_exclude_ids(a.exclude_ids)
     cfg = load_serving_config(a.config)
     engineer = load_demos(a.engineer)
-    teacher = load_demos(a.teacher) if a.teacher else []
+    teacher = [d for path in (a.teacher or []) for d in load_demos(path)]
     aux = read_jsonl(a.aux) if a.aux else []
     check_excluded(engineer + teacher, exclude, "inputs")
     check_excluded(aux, exclude, "aux examples")
@@ -539,7 +553,12 @@ def cmd_sft_mix(a) -> int:
 
         llm = make_text_llm(a.backfill_model)
         engineer = [backfill_thoughts(d, llm) if keep_engineer(d) else d for d in engineer]
-    records = build_sft_mix(engineer, teacher, aux, _parse_ratio(a.ratio), a.aux_frac, a.seed, cfg, exclude)
+    records = build_sft_mix(engineer, teacher, aux, _parse_ratio(a.ratio), a.aux_frac, a.seed, cfg, exclude,
+                            edge_case_weight=a.edge_case_weight)
+    for path in a.extra_records or []:   # pre-rendered records (e.g. onpolicy-distill): kept as-is
+        extra = read_jsonl(path)
+        check_excluded(extra, exclude, path)   # records carry meta.parent_id
+        records += extra
     write_jsonl(records, a.out)
     print(json.dumps(mix_stats(records)))
     return 0
@@ -548,10 +567,15 @@ def cmd_sft_mix(a) -> int:
 def register(subparsers) -> None:
     p = subparsers.add_parser("sft-mix", help="§3a: build the SFT mix (engineer + teacher + aux)")
     p.add_argument("--engineer", required=True)
-    p.add_argument("--teacher", default=None)
+    p.add_argument("--teacher", nargs="+", default=None)
     p.add_argument("--aux", default=None)
     p.add_argument("--out", default="runs/sft/sft_mix.jsonl")
     p.add_argument("--ratio", default="1:3", help="engineer:teacher by trajectory count")
+    p.add_argument("--extra-records", action="append", default=None,
+                   help="JSONL of already-rendered records to append unchanged (repeatable), e.g. onpolicy-distill output")
+    p.add_argument("--edge-case-weight", type=float, default=1.0,
+                   help="loss-weight multiplier for instances whose hidden tests go beyond the issue's example "
+                        "(the student's main failure mode; try 2.0)")
     p.add_argument("--aux-frac", type=float, default=0.2, help="max share of total tokens for aux tasks")
     p.add_argument("--backfill-model", default=None, help="teacher model for thought backfill")
     p.add_argument("--collapse-noops", action="store_true", help="drop no-op steps (re-executes demos)")

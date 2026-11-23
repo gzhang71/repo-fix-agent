@@ -113,10 +113,15 @@ class VoyageEmbedder:
         self.spec = f"voyage:{model}"
 
     def embed(self, texts: Sequence[str]) -> list[Vector]:
+        from ..llm_cache import cached_call
+
         out: list[Vector] = []
         for i in range(0, len(texts), self.batch_size):
-            r = self.client.embed(list(texts[i:i + self.batch_size]), model=self.model, input_type="document")
-            out.extend(_normalise(v) for v in r.embeddings)
+            req = {"model": self.model, "input": list(texts[i:i + self.batch_size]), "input_type": "document",
+                   "temperature": 0}   # embeddings are deterministic: dedupe
+            vecs = cached_call("voyage:embed", req, lambda: list(map(list, self.client.embed(
+                req["input"], model=self.model, input_type="document").embeddings)))
+            out.extend(_normalise(v) for v in vecs)
         return out
 
 
@@ -132,10 +137,14 @@ class OpenAIEmbedder:
         self.spec = f"openai:{model}"
 
     def embed(self, texts: Sequence[str]) -> list[Vector]:
+        from ..llm_cache import cached_call
+
         out: list[Vector] = []
         for i in range(0, len(texts), self.batch_size):
-            r = self.client.embeddings.create(model=self.model, input=list(texts[i:i + self.batch_size]))
-            out.extend(_normalise(d.embedding) for d in r.data)
+            req = {"model": self.model, "input": list(texts[i:i + self.batch_size]), "temperature": 0}
+            vecs = cached_call(f"embeddings:{getattr(self.client, 'base_url', '')}", req, lambda: [
+                list(d.embedding) for d in self.client.embeddings.create(model=self.model, input=req["input"]).data])
+            out.extend(_normalise(v) for v in vecs)
         return out
 
 

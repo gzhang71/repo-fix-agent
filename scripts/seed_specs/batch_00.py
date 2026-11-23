@@ -88,6 +88,10 @@ SPECS = [
                 a = Item("apple"); b = Item("banana")
                 a.add_tag("fruit")
                 b.tags  # ['fruit']  <- expected []
+
+            The same aliasing bites when you do pass a list: `add_tag` also appends to the
+            list the caller handed in, so a shared list of default tags grows every time an
+            item is tagged. An item should own its tags.
             """,
         files={
             "inventory/__init__.py": "from .item import Item\n",

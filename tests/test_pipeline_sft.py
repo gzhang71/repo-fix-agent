@@ -111,7 +111,9 @@ def test_record_has_loss_mask_on_assistant_only(demo):
     assert [m for m, msg in zip(rec["loss_mask"], rec["messages"]) if m] and all(
         (msg["role"] == "assistant") == m for m, msg in zip(rec["loss_mask"], rec["messages"]))
     assert rec["tools"] == sft.tools_as_functions()
-    assert rec["messages"] == sft.render_messages(demo)  # default 64k budget: nothing elided
+    cfg0 = StudentServingConfig()
+    assert rec["messages"] == sft.render_messages(demo, cfg0.agent_options().system_prompt(),
+                                                  reasoning_field=cfg0.keep_reasoning)  # nothing elided
 
 
 def test_context_budget_is_the_shared_policy(demo):
@@ -119,7 +121,9 @@ def test_context_budget_is_the_shared_policy(demo):
     base = S.message_tokens([]) + len(json.dumps(sft.tools_as_functions()))
     cfg.max_context_tokens = base + cfg.max_new_tokens + 1200
     rec = S.render_record(demo, cfg)
-    assert rec["messages"] == apply_context_budget(sft.render_messages(demo), sft.tools_as_functions(), cfg)
+    assert rec["messages"] == apply_context_budget(
+        sft.render_messages(demo, cfg.agent_options().system_prompt(), reasoning_field=cfg.keep_reasoning),
+        sft.tools_as_functions(), cfg)
     assert any(m["content"] == LocalModelPolicy.ELIDED for m in rec["messages"] if m["role"] == "tool")
 
 
@@ -238,8 +242,9 @@ def test_prompt_consistency_with_local_model_policy(demo):
 
 def test_prompt_consistency_detects_drift(demo, monkeypatch):
     real = sft.render_messages
-    monkeypatch.setattr(sft, "render_messages", lambda d: [{**m, "content": m["content"] + "!"}
-                                                           if m["role"] == "system" else m for m in real(d)])
+    monkeypatch.setattr(sft, "render_messages", lambda d, *a, **kw: [{**m, "content": m["content"] + "!"}
+                                                                     if m["role"] == "system" else m
+                                                                     for m in real(d, *a, **kw)])
     assert "system prompt differs" in S.check_prompt_consistency(demo)
 
 

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .llm_cache import cached_call
+
 
 class TextLLM(Protocol):
     def __call__(self, system: str, prompt: str) -> str: ...
@@ -25,11 +27,10 @@ class AnthropicTextLLM:
         self.model, self.effort, self.max_tokens = model, effort, max_tokens
 
     def __call__(self, system: str, prompt: str) -> str:
-        resp = self.client.messages.create(
-            model=self.model, max_tokens=self.max_tokens, system=system,
-            thinking={"type": "adaptive"}, output_config={"effort": self.effort},
-            messages=[{"role": "user", "content": prompt}],
-        )
+        kwargs = dict(model=self.model, max_tokens=self.max_tokens, system=system,
+                      thinking={"type": "adaptive"}, output_config={"effort": self.effort},
+                      messages=[{"role": "user", "content": prompt}])
+        resp = cached_call("anthropic:messages", kwargs, lambda: self.client.messages.create(**kwargs))
         if resp.stop_reason == "refusal":
             raise LLMRefusal(f"{self.model} refused")
         return "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -43,11 +44,11 @@ class OpenAITextLLM:
         self.model, self.reasoning_effort, self.max_completion_tokens = model, reasoning_effort, max_completion_tokens
 
     def __call__(self, system: str, prompt: str) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model, reasoning_effort=self.reasoning_effort,
-            max_completion_tokens=self.max_completion_tokens,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        )
+        kwargs = dict(model=self.model, reasoning_effort=self.reasoning_effort,
+                      max_completion_tokens=self.max_completion_tokens,
+                      messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}])
+        resp = cached_call(f"chat:{getattr(self.client, 'base_url', '')}", kwargs,
+                           lambda: self.client.chat.completions.create(**kwargs))
         return (resp.choices[0].message.content or "").strip()
 
 

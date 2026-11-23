@@ -565,6 +565,27 @@ def cmd_best_of_n(a) -> int:
     from .. import policies
 
     issue = Path(a.issue_file).read_text() if a.issue_file else a.issue
+    if a.verifier == "exec":   # execution reranker: pooled scratch_*.py checks + suite + agreement
+        from ..env import RepoEnv
+        from ..schema import Demo as _D
+        from .parallel import pmap
+        from .rerank import rerank
+        from ..agent import run_agent
+
+        def one(k):
+            with RepoEnv(a.repo, backend=a.backend) as env:
+                res = run_agent(policies.make_policy(a.model, a.temperature), env, issue, a.test_cmd, a.max_steps)
+            return _D(f"cand-{k}", a.repo, None, issue, a.test_cmd or "", "", [], [], res.patch, res.trajectory)
+
+        ranked = rerank(pmap(one, range(a.n), a.workers), a.repo, None, a.test_cmd, a.backend)
+        for r in ranked:
+            print(f"cand {r.index}: score {r.score:.3f}, suite {r.suite_ok}, checks {r.checks_passed}/"
+                  f"{r.checks_total}, agreement {r.agreement:.2f}", file=sys.stderr)
+        patch = ranked[0].patch if ranked and ranked[0].score >= 0 else ""
+        print(patch or "(no changes)")
+        if a.apply and patch:
+            subprocess.run(["git", "apply", "-"], cwd=a.repo, input=patch, text=True, check=True)
+        return 0 if patch else 1
     scorer = load_scorer(a.verifier)
     res = run_best_of_n(lambda: policies.make_policy(a.model), issue, a.repo, a.n, scorer,
                         test_cmd=a.test_cmd, max_steps=a.max_steps, backend=a.backend, vote_weight=a.vote_weight,
@@ -602,7 +623,10 @@ def register(subparsers) -> None:
     b.add_argument("--model", default="student")
     b.add_argument("--n", type=int, default=4)
     b.add_argument("--workers", type=int, default=1, help="sample the n candidates concurrently")
-    b.add_argument("--verifier", required=True, help="model.json from verifier-train, or judge:<model>")
+    b.add_argument("--verifier", default="exec",
+                   help="exec (execution reranker, default: no model calls), model.json from verifier-train, "
+                        "or judge:<model>")
+    b.add_argument("--temperature", type=float, default=0.7, help="student sampling temperature")
     b.add_argument("--vote-weight", type=float, default=0.3)
     b.add_argument("--test-cmd", default=None)
     b.add_argument("--max-steps", type=int, default=40)

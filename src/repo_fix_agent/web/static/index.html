@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Repo Fix</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e4e4df;
+  --accent: #2f5bd3; --accent-ink: #ffffff; --ok: #1f7a4d; --ok-bg: #e3f3ea; --warn: #8a5a00; --warn-bg: #fbf0d9;
+  --bad: #b3261e; --bad-bg: #fbe5e3; --run: #2f5bd3; --run-bg: #e6ecfb; --idle-bg: #efefeb;
+  --add: #e6f4ea; --add-ink: #1a5c34; --del: #fbe9e8; --del-ink: #8c1d18; --hunk: #6b6b66;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413; --panel: #1d1d1b; --ink: #ecece8; --muted: #9a9a93; --line: #2f2f2c;
+    --accent: #7c9cff; --accent-ink: #0d1530; --ok: #6fd39f; --ok-bg: #173527; --warn: #f0c46a; --warn-bg: #3a2e14;
+    --bad: #ff8a80; --bad-bg: #401c19; --run: #9db4ff; --run-bg: #1e2846; --idle-bg: #2a2a27;
+    --add: #15301f; --add-ink: #8fe0ad; --del: #3a1a18; --del-ink: #ffaaa3; --hunk: #9a9a93;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); }
+header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
+header .pills { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--idle-bg); color: var(--muted); white-space: nowrap; }
+.pill.ok { background: var(--ok-bg); color: var(--ok); } .pill.bad { background: var(--bad-bg); color: var(--bad); }
+.layout { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 53px); }
+aside { border-right: 1px solid var(--line); padding: 16px; background: var(--panel); }
+aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 18px 0 8px; }
+.joblink { display: block; padding: 8px 10px; border-radius: 8px; text-decoration: none; color: var(--ink); margin-bottom: 4px; }
+.joblink:hover, .joblink.active { background: var(--idle-bg); }
+.joblink .slug { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.joblink .meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+main { padding: 24px; max-width: 1100px; width: 100%; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+button, .btn { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 7px 14px; border-radius: 8px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+button:hover, .btn:hover { border-color: var(--muted); }
+button.primary, .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--bad); }
+button.confirm { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+.wide { width: 100%; justify-content: center; }
+label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+.hint { font-size: 12px; color: var(--muted); font-weight: 400; }
+input[type=text], input[type=number], select, textarea { width: 100%; font: inherit; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); }
+textarea { font-family: var(--mono); font-size: 12px; min-height: 70px; }
+input.big { font-size: 16px; padding: 12px 14px; }
+.row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 16px; }
+.checks label { display: flex; gap: 8px; align-items: center; font-weight: 400; margin: 6px 0; }
+details summary { cursor: pointer; color: var(--muted); margin-top: 14px; }
+.error { background: var(--bad-bg); color: var(--bad); padding: 10px 12px; border-radius: 8px; white-space: pre-wrap; font-size: 13px; margin-top: 12px; }
+.jobhead { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.jobhead h2 { margin: 0; font-size: 20px; }
+.jobhead .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.jobhead .actions { margin-left: auto; display: flex; gap: 8px; }
+.badge { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--idle-bg); color: var(--muted); white-space: nowrap; }
+.b-verified, .b-done, .b-open { background: var(--ok-bg); color: var(--ok); }
+.b-fixing, .b-verifying, .b-cloning, .b-setup, .b-discovering, .b-running, .b-opening { background: var(--run-bg); color: var(--run); }
+.b-unverified, .b-no_fix, .b-cancelled { background: var(--warn-bg); color: var(--warn); }
+.b-failed, .b-regressed { background: var(--bad-bg); color: var(--bad); }
+.stepper { display: flex; gap: 6px; margin: 18px 0 4px; flex-wrap: wrap; }
+.stage { flex: 1; min-width: 110px; padding: 8px 10px; border-radius: 8px; background: var(--idle-bg); color: var(--muted); font-size: 12px; font-weight: 600; }
+.stage.done { background: var(--ok-bg); color: var(--ok); } .stage.now { background: var(--run-bg); color: var(--run); }
+.stage.bad { background: var(--bad-bg); color: var(--bad); }
+.summary { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+.summary .stat b { font-size: 18px; margin-right: 4px; }
+.summary .grow { flex: 1; }
+.bug { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-top: 12px; }
+.bug .top { display: flex; gap: 10px; align-items: flex-start; }
+.bug .title { font-weight: 600; flex: 1; word-break: break-word; }
+.chip { font-size: 11px; padding: 1px 8px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.live { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tests { margin: 8px 0 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 12px; }
+.tests li { padding: 1px 0; word-break: break-all; }
+.tests .y { color: var(--ok); } .tests .n { color: var(--bad); } .tests .q { color: var(--muted); }
+.bug .btns { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+.bug .note { font-size: 12px; color: var(--muted); }
+.bug .prerr { font-size: 12px; color: var(--bad); white-space: pre-wrap; margin-top: 8px; }
+.summarytext { font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+pre.diff { font-family: var(--mono); font-size: 12px; line-height: 1.45; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 0; overflow-x: auto; margin: 10px 0 0; }
+pre.diff span { display: block; padding: 0 12px; white-space: pre; }
+pre.diff .a { background: var(--add); color: var(--add-ink); } pre.diff .d { background: var(--del); color: var(--del-ink); }
+pre.diff .h { color: var(--hunk); } pre.diff .f { font-weight: 700; }
+.log { font-family: var(--mono); font-size: 12px; max-height: 340px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+.log div { white-space: pre-wrap; word-break: break-word; } .log .t { color: var(--muted); margin-right: 8px; } .log .bid { color: var(--accent); margin-right: 6px; }
+.empty { color: var(--muted); text-align: center; padding: 30px 10px; }
+.how { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-top: 18px; }
+.how div { background: var(--bg); border-radius: 8px; padding: 10px 12px; font-size: 12px; color: var(--muted); }
+.how b { display: block; color: var(--ink); font-size: 13px; margin-bottom: 2px; }
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid var(--line); }
+  main { padding: 16px; }
+  header .pills { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Repo Fix</h1>
+  <div class="pills" id="pills"></div>
+</header>
+<div class="layout">
+  <aside>
+    <a class="btn wide primary" href="#/new">+ New run</a>
+    <h2>Runs</h2>
+    <div id="jobs"><div class="empty">No runs yet</div></div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+};
+const ACTIVE = new Set(["queued", "cloning", "setup", "discovering", "fixing"]);
+const LABEL = {queued: "queued", cloning: "cloning", setup: "installing deps", discovering: "finding bugs", fixing: "fixing",
+  done: "done", failed: "failed", cancelled: "cancelled", verifying: "verifying", verified: "verified",
+  unverified: "unverified", regressed: "regressed", no_fix: "no fix", open: "PR open", opening: "opening PR"};
+const badge = s => `<span class="badge b-${esc(s)}">${esc(LABEL[s] || s)}</span>`;
+const ago = t => { const s = Math.max(0, Date.now() / 1000 - t); return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
+const clock = t => new Date(t * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+
+let lastSig = null, CONFIG = null, current = null, pollTimer = null, events = [], lastSeq = 0, openDiffs = new Set(), confirming = null, logFilter = null;
+
+async function loadConfig() {
+  CONFIG = await api("/api/config");
+  $("#pills").innerHTML = `<span class="pill ${CONFIG.backend === "docker" ? "ok" : "bad"}">sandbox: ${esc(CONFIG.backend)}</span>
+    <span class="pill ${CONFIG.github_auth ? "ok" : "bad"}">${CONFIG.github_auth ? "GitHub connected" : "GitHub not connected"}</span>`;
+}
+
+async function loadJobs() {
+  const jobs = await api("/api/jobs");
+  $("#jobs").innerHTML = jobs.length ? jobs.map(j => `
+    <a class="joblink ${current === j.id ? "active" : ""}" href="#/job/${esc(j.id)}">
+      <div class="slug">${esc(j.repo.slug || j.config.repo_url)}</div>
+      <div class="meta">${badge(j.status)}<span>${j.n_verified}/${j.n_bugs} fixed</span><span>${ago(j.created)}</span></div>
+    </a>`).join("") : `<div class="empty">No runs yet</div>`;
+}
+
+function renderNew(prefill = {}) {
+  current = null; stopPoll();
+  const models = CONFIG.models.map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("");
+  $("#main").innerHTML = `
+  <div class="card">
+    <h2 style="margin:0 0 4px;font-size:20px">Fix the bugs in a repository</h2>
+    <div class="hint">The agent clones the repo, finds failing tests (and optionally open bug issues), fixes each one in an isolated sandbox, re-runs the tests to verify, and prepares one pull request per fix.</div>
+    <form id="newform">
+      <label for="repo_url">Repository URL</label>
+      <input class="big" id="repo_url" type="text" placeholder="https://github.com/owner/repo" autocomplete="off" required value="${esc(prefill.repo_url || "")}">
+      <div class="row">
+        <div><label for="model">Model</label><select id="model">${models}</select></div>
+        <div><label for="branch">Branch <span class="hint">(default branch if empty)</span></label><input id="branch" type="text" placeholder="default branch"></div>
+        <div><label for="max_bugs">Max bugs</label><input id="max_bugs" type="number" min="1" max="50" value="10"></div>
+      </div>
+      <label>Find bugs from</label>
+      <div class="checks">
+        <label><input type="checkbox" id="src_tests" checked> Failing tests <span class="hint">(fixes are verified by re-running them)</span></label>
+        <label><input type="checkbox" id="src_issues"> Open GitHub issues labeled <code>bug</code> <span class="hint">(no test to verify; marked unverified)</span></label>
+      </div>
+      <label>Pull requests</label>
+      <div class="checks">
+        <label><input type="radio" name="prmode" value="review" checked> Let me review each fix, then open PRs</label>
+        <label><input type="radio" name="prmode" value="auto"> Open PRs automatically for verified fixes</label>
+      </div>
+      <details>
+        <summary>Advanced</summary>
+        <label for="test_cmd">Test command</label>
+        <input id="test_cmd" type="text" value="${esc(CONFIG.default_test_cmd)}">
+        <label for="setup_cmd">Setup command <span class="hint">(runs once with network to install dependencies; default installs requirements*.txt and the package)</span></label>
+        <textarea id="setup_cmd" placeholder="pip install -e '.[test]'"></textarea>
+        <div class="row">
+          <div><label for="workers">Fix in parallel</label><input id="workers" type="number" min="1" max="8" value="2"></div>
+          <div><label for="max_steps">Max agent steps per bug</label><input id="max_steps" type="number" min="5" max="150" value="40"></div>
+          <div><label for="test_timeout">Test timeout (s)</label><input id="test_timeout" type="number" min="30" max="7200" value="900"></div>
+        </div>
+      </details>
+      <div style="margin-top:18px;display:flex;gap:12px;align-items:center">
+        <button class="primary" type="submit" id="startbtn">Find and fix bugs</button>
+        <span class="hint">${CONFIG.github_auth ? "" : "GitHub isn't connected: you'll get patches, but PRs need GITHUB_TOKEN or <code>gh auth login</code>."}</span>
+      </div>
+      <div id="formerr"></div>
+    </form>
+    <div class="how">
+      <div><b>1. Clone</b>Your GitHub login is used for private repos; nothing leaves this machine except the model calls.</div>
+      <div><b>2. Sandbox</b>Dependencies install once; the agent then works in containers with no network.</div>
+      <div><b>3. Verify</b>A fix counts only if its tests pass and nothing that passed before breaks.</div>
+      <div><b>4. PRs</b>One branch and PR per fix, each based on the original commit.</div>
+    </div>
+  </div>`;
+  $("#newform").addEventListener("submit", async e => {
+    e.preventDefault();
+    const sources = [$("#src_tests").checked && "tests", $("#src_issues").checked && "issues"].filter(Boolean);
+    if (!sources.length) { $("#formerr").innerHTML = `<div class="error">Pick at least one bug source.</div>`; return; }
+    const body = {repo_url: $("#repo_url").value.trim(), model: $("#model").value, branch: $("#branch").value.trim() || null,
+      max_bugs: +$("#max_bugs").value, sources, auto_pr: document.querySelector("input[name=prmode]:checked").value === "auto",
+      test_cmd: $("#test_cmd").value.trim(), setup_cmd: $("#setup_cmd").value.trim() || null,
+      workers: +$("#workers").value, max_steps: +$("#max_steps").value, test_timeout: +$("#test_timeout").value};
+    $("#startbtn").disabled = true;
+    try { const job = await api("/api/jobs", {method: "POST", body: JSON.stringify(body)}); location.hash = `#/job/${job.id}`; }
+    catch (err) { $("#formerr").innerHTML = `<div class="error">${esc(err.message)}</div>`; $("#startbtn").disabled = false; }
+  });
+  $("#repo_url").focus();
+  loadJobs();
+}
+
+function stopPoll() { if (pollTimer) clearTimeout(pollTimer); pollTimer = null; }
+
+async function openJob(id) {
+  if (current !== id) { current = id; lastSig = null; events = []; lastSeq = 0; openDiffs = new Set(); confirming = null; logFilter = null; $("#main").innerHTML = `<div class="empty">Loading…</div>`; }
+  stopPoll();
+  try {
+    const job = await api(`/api/jobs/${encodeURIComponent(id)}?since=${lastSeq}`);
+    if (current !== id) return;
+    events = events.concat(job.events); if (events.length > 2000) events = events.slice(-2000);
+    if (events.length) lastSeq = events[events.length - 1].seq;
+    const sig = JSON.stringify({...job, events: lastSeq});   // re-render only when something changed,
+    if (sig !== lastSig) { lastSig = sig; renderJob(job); }   // so clicks and selections survive polling
+    const busy = ACTIVE.has(job.status) || job.bugs.some(b => b.pr && b.pr.state === "opening");
+    pollTimer = setTimeout(() => openJob(id), busy ? 1500 : 6000);
+    loadJobs();
+  } catch (err) {
+    $("#main").innerHTML = `<div class="card"><div class="error">${esc(err.message)}</div></div>`;
+  }
+}
+
+function stages(job) {
+  const order = ["cloning", "setup", "discovering", "fixing", "done"];
+  const names = {cloning: "Clone", setup: "Environment", discovering: "Find bugs", fixing: "Fix & verify", done: "Review & PRs"};
+  const list = CONFIG.backend === "docker" ? order : order.filter(s => s !== "setup");
+  let idx = list.indexOf(job.status);
+  if (job.status === "queued") idx = -1;
+  const terminalBad = job.status === "failed" || job.status === "cancelled";
+  if (terminalBad) idx = list.indexOf(lastStageReached(job, list));
+  return `<div class="stepper">${list.map((s, i) => {
+    let cls = i < idx || job.status === "done" ? "done" : i === idx ? (terminalBad ? "bad" : "now") : "";
+    return `<div class="stage ${cls}">${names[s]}</div>`;
+  }).join("")}</div>`;
+}
+function lastStageReached(job, list) {
+  if (job.bugs.length) return "fixing";
+  if (job.baseline && job.baseline.passed !== undefined) return "discovering";
+  if (job.image) return "discovering";
+  if (job.repo && job.repo.base_sha) return list.includes("setup") ? "setup" : "discovering";
+  return "cloning";
+}
+
+function diffHtml(patch) {
+  return `<pre class="diff">${patch.split("\n").map(l => {
+    const c = l.startsWith("+++") || l.startsWith("---") || l.startsWith("diff ") ? "f" : l.startsWith("@@") ? "h" : l.startsWith("+") ? "a" : l.startsWith("-") ? "d" : "";
+    return `<span class="${c}">${esc(l) || " "}</span>`;
+  }).join("")}</pre>`;
+}
+
+function bugCard(job, b) {
+  const v = b.verification || {};
+  const tests = b.tests.length ? `<ul class="tests">${b.tests.slice(0, 12).map(t => {
+    const r = v.targets ? v.targets[t] : undefined;
+    return `<li class="${r === true ? "y" : r === false ? "n" : "q"}">${r === true ? "✓" : r === false ? "✗" : "•"} ${esc(t)}</li>`;
+  }).join("")}${b.tests.length > 12 ? `<li class="q">… ${b.tests.length - 12} more</li>` : ""}</ul>` : "";
+  const running = b.status === "fixing" || b.status === "verifying";
+  const live = running ? `<div class="live">${b.status === "verifying" ? "re-running the test suite with the fix…" : `step ${b.steps}/${job.config.max_steps} · ${esc(b.last_action || "thinking…")}`}</div>` : "";
+  let pr = "";
+  if (b.pr && b.pr.state === "open") pr = `<a class="btn" href="${esc(b.pr.url)}" target="_blank" rel="noopener">${badge("open")} PR #${esc(b.pr.number)}</a>`;
+  else if (b.pr && b.pr.state === "opening") pr = `<button disabled>${badge("opening")}</button>`;
+  else if (b.patch && job.repo.can_open_prs) {
+    const isConf = confirming === b.id;
+    const risky = b.status !== "verified";
+    pr = `<button class="${isConf ? "confirm" : risky ? "" : "primary"}" data-pr="${esc(b.id)}">${isConf ? `Confirm: open PR on ${esc(job.repo.slug)}` : risky ? "Open PR anyway" : "Open PR"}</button>`;
+  }
+  const meta = [];
+  if (v.passed !== undefined) meta.push(`suite after fix: ${v.passed} passed, ${v.failed} failed` +
+    (v.new_failures && !v.new_failures.length ? ` (no new failures${v.failed ? "; the rest failed before too" : ""})` : ""));
+  if (v.new_failures && v.new_failures.length) meta.push(`<span style="color:var(--bad)">new failures: ${v.new_failures.map(esc).slice(0, 4).join(", ")}</span>`);
+  if (b.status === "unverified") meta.push("no failing test reproduces this issue; review the diff");
+  return `<div class="bug" id="bug-${esc(b.id)}">
+    <div class="top">
+      <div class="title">${esc(b.title)}</div>
+      <span class="chip">${b.source === "issue" ? `issue #${esc(b.issue_number)}` : "failing tests"}</span>
+      ${badge(b.status)}
+    </div>
+    ${live}${tests}
+    ${b.summary && !running ? `<div class="summarytext">${esc(b.summary)}</div>` : ""}
+    ${b.error ? `<div class="prerr">${esc(b.error)}</div>` : ""}
+    <div class="btns">
+      ${pr}
+      ${b.patch ? `<button data-diff="${esc(b.id)}">${openDiffs.has(b.id) ? "Hide diff" : `View diff (${b.patch.split("\n").filter(l => /^[+-](?![+-]{2})/.test(l)).length} lines)`}</button>
+      <a class="btn" href="/api/jobs/${esc(job.id)}/bugs/${esc(b.id)}/patch">Download patch</a>` : ""}
+      <button data-log="${esc(b.id)}">${logFilter === b.id ? "All activity" : "Activity"}</button>
+      <span class="note">${meta.join(" · ")}</span>
+    </div>
+    ${b.pr && b.pr.state === "failed" ? `<div class="prerr">PR failed: ${esc(b.pr.error)}</div>` : ""}
+    ${openDiffs.has(b.id) && b.patch ? diffHtml(b.patch) : ""}
+  </div>`;
+}
+
+function renderJob(job) {
+  const scrollLog = $("#log"); const atBottom = !scrollLog || scrollLog.scrollTop + scrollLog.clientHeight >= scrollLog.scrollHeight - 20;
+  const n = job.bugs.length, ver = job.bugs.filter(b => b.status === "verified").length;
+  const prs = job.bugs.filter(b => b.pr && b.pr.state === "open").length;
+  const canBulk = job.repo.can_open_prs && job.bugs.some(b => b.status === "verified" && !(b.pr && ["open", "opening"].includes(b.pr.state)));
+  const bulkN = job.bugs.filter(b => b.status === "verified" && !(b.pr && ["open", "opening"].includes(b.pr.state))).length;
+  const base = job.repo.base_branch ? `${esc(job.repo.base_branch)} @ ${esc((job.repo.base_sha || "").slice(0, 8))} · ` : "";
+  const repoLink = job.repo.is_github ? `<a href="https://github.com/${esc(job.repo.slug)}" target="_blank" rel="noopener">${esc(job.repo.slug)}</a>` : esc(job.repo.slug);
+  const bl = job.baseline && job.baseline.passed !== undefined ? `<div class="stat"><b>${job.baseline.passed}</b>passing</div><div class="stat"><b>${job.baseline.failed.length}</b>failing before</div>` : "";
+  const filtered = logFilter ? events.filter(e => e.bug === logFilter) : events;
+  $("#main").innerHTML = `
+  <div class="card">
+    <div class="jobhead">
+      <div><h2>${repoLink}</h2><div class="sub">${base}${esc(job.config.model)} · started ${ago(job.created)}</div></div>
+      <div class="actions">${badge(job.status)}
+        ${ACTIVE.has(job.status) ? `<button class="danger" id="cancel">Cancel</button>` : ""}
+        <button id="rerun">Run again</button></div>
+    </div>
+    ${stages(job)}
+    ${job.error ? `<div class="error">${esc(job.error)}</div>` : ""}
+    <div class="summary">
+      ${bl}<div class="stat"><b>${n}</b>bugs</div><div class="stat"><b>${ver}</b>verified fixes</div><div class="stat"><b>${prs}</b>PRs open</div>
+      <div class="grow"></div>
+      ${canBulk ? `<button class="${confirming === "*" ? "confirm" : "primary"}" id="bulk">${confirming === "*" ? `Confirm: open ${bulkN} PR${bulkN > 1 ? "s" : ""} on ${esc(job.repo.slug)}` : `Open PRs for ${bulkN} verified fix${bulkN > 1 ? "es" : ""}`}</button>` : ""}
+      ${!job.repo.can_open_prs && job.repo.base_sha && n ? `<span class="hint">Not a GitHub repo: download the patches.</span>` : ""}
+    </div>
+  </div>
+  ${n ? `<div class="card"><h3 style="margin:0;font-size:15px">Fixes</h3>${job.bugs.map(b => bugCard(job, b)).join("")}</div>` :
+    job.status === "done" ? `<div class="card empty">No bugs found: the test suite passes${job.config.sources.includes("issues") ? " and there are no open bug issues" : ""}.</div>` : ""}
+  <div class="card">
+    <h3 style="margin:0 0 10px;font-size:15px">Activity ${logFilter ? `<span class="hint">· ${esc(logFilter)} only</span>` : ""}</h3>
+    <div class="log" id="log">${filtered.map(e => `<div><span class="t">${clock(e.t)}</span>${e.bug ? `<span class="bid">[${esc(e.bug)}]</span>` : ""}${esc(e.msg)}</div>`).join("") || `<div class="t">waiting…</div>`}</div>
+  </div>`;
+  const lg = $("#log"); if (atBottom) lg.scrollTop = lg.scrollHeight;
+  const c = $("#cancel"); if (c) c.onclick = async () => { c.disabled = true; await api(`/api/jobs/${job.id}/cancel`, {method: "POST"}); openJob(job.id); };
+  $("#rerun").onclick = () => { location.hash = "#/new"; setTimeout(() => { $("#repo_url").value = job.config.repo_url; }, 0); };
+  const bulk = $("#bulk");
+  if (bulk) bulk.onclick = async () => {
+    if (confirming !== "*") { confirming = "*"; return renderJob(job); }
+    confirming = null; bulk.disabled = true;
+    try { await api(`/api/jobs/${job.id}/prs`, {method: "POST"}); } catch (err) { alertInline(err.message); }
+    openJob(job.id);
+  };
+  document.querySelectorAll("[data-pr]").forEach(btn => btn.onclick = async () => {
+    const id = btn.dataset.pr;
+    if (confirming !== id) { confirming = id; return renderJob(job); }
+    confirming = null; btn.disabled = true;
+    try { await api(`/api/jobs/${job.id}/bugs/${id}/pr`, {method: "POST"}); } catch (err) { alertInline(err.message); }
+    openJob(job.id);
+  });
+  document.querySelectorAll("[data-diff]").forEach(btn => btn.onclick = () => {
+    const id = btn.dataset.diff; openDiffs.has(id) ? openDiffs.delete(id) : openDiffs.add(id); renderJob(job);
+  });
+  document.querySelectorAll("[data-log]").forEach(btn => btn.onclick = () => {
+    logFilter = logFilter === btn.dataset.log ? null : btn.dataset.log; renderJob(job);
+  });
+}
+
+function alertInline(msg) {
+  const d = document.createElement("div"); d.className = "error"; d.textContent = msg;
+  $("#main").prepend(d); setTimeout(() => d.remove(), 8000);
+}
+
+function route() {
+  const m = location.hash.match(/^#\/job\/([\w-]+)/);
+  if (m) openJob(m[1]); else renderNew();
+}
+window.addEventListener("hashchange", route);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && confirming) { confirming = null; if (current) openJob(current); } });
+loadConfig().then(() => { route(); loadJobs(); setInterval(() => { if (!current) loadJobs(); }, 10000); })
+  .catch(err => { $("#main").innerHTML = `<div class="card"><div class="error">Cannot reach the server: ${esc(err.message)}</div></div>`; });
+</script>
+</body>
+</html>

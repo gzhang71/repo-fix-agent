@@ -21,15 +21,28 @@ student:
     - name: openai/gpt-oss-20b
       why: small, permissive license (Apache-2.0), strong reasoning per parameter; good low-cost arm
   serving:
-    # Read by LocalModelPolicy (`repo-fix eval ... --model student` or `student:<served-name>`).
-    base_url: http://localhost:8000/v1      # vLLM / SGLang OpenAI-compatible server
-    model_name: student                     # --served-model-name
-    api_key_env: STUDENT_API_KEY            # optional; "EMPTY" if unset
-    max_context_tokens: 65536               # set to the model's context window (= vLLM --max-model-len)
+    # Read by LocalModelPolicy (`repo-fix eval ... --model student` or `student:<model-id>`).
+    # Default: Fireworks serverless (OpenAI-compatible, native tool calling), key in .env.
+    # Small and cheap: Nemotron Lightning 3.5 (30B MoE, ~3B active), the smallest tool-calling
+    # model on Fireworks serverless (same size class as Qwen3-Coder-30B-A3B above). Larger
+    # serverless options: .../minimax-m3p1-flash, .../glm-5p3-flash, .../deepseek-v4p1-flash.
+    # A fine-tuned student deployed on Fireworks gets its own accounts/<you>/models/<id>.
+    base_url: https://api.fireworks.ai/inference/v1
+    model_name: accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b
+    api_key_env: FIREWORKS_API_KEY
+    # Self-hosted instead (vLLM / SGLang):
+    #   base_url: http://localhost:8000/v1
+    #   model_name: student                 # --served-model-name
+    #   api_key_env: STUDENT_API_KEY        # optional; "EMPTY" if unset
+    max_context_tokens: 131072              # budget we allow (model supports 262k; vLLM: --max-model-len)
     max_new_tokens: 4096                    # reserved per response
     chars_per_token: 3.5                    # budgeting estimate; tune for the tokenizer
     keep_recent_observations: 3             # older tool outputs are elided first when over budget
     temperature: 0.0                        # 0 for eval; >0 for RL rollouts / best-of-n
+    # Inference scaffold (also used for SFT rendering, RL and distillation, so train == inference):
+    keep_reasoning: true                    # keep + resend the model's reasoning_content each turn
+    spec_check: true                        # system prompt: list implied behaviours/edge cases, repro them
+    submit_gate: true                       # one nudge if `submit` follows an unchecked edit
     # launch: vllm serve <weights> --served-model-name student --max-model-len 65536
     #         --enable-auto-tool-choice --tool-call-parser <parser matching the model family>
   finetune:

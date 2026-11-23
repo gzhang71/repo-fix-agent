@@ -18,13 +18,14 @@ from .tools import ToolState, execute_tool
 
 _PATCH_FILE = ".git/repofix-incoming.patch"
 _DIFF_FILE = ".git/repofix-outgoing.diff"
-_TEST_EXCLUDES = "':(exclude)tests/**' ':(exclude)**/test_*.py' ':(exclude)**/*_test.py'"
+_TEST_EXCLUDES = ("':(exclude)tests/**' ':(exclude)**/test_*.py' ':(exclude)**/*_test.py' "
+                  "':(exclude)scratch_*' ':(exclude)**/scratch_*'")   # agent repro scripts never ship
 
 
 class RepoEnv:
     def __init__(self, repo: str | Path, base_commit: str | None = None, backend: str = "auto",
-                 limits: SandboxLimits | None = None):
-        self.sandbox = make_sandbox(str(repo), base_commit, backend=backend, limits=limits)
+                 limits: SandboxLimits | None = None, image: str | None = None):
+        self.sandbox = make_sandbox(str(repo), base_commit, backend=backend, limits=limits, image=image)
         self.state = ToolState()
 
     @property

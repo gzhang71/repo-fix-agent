@@ -67,7 +67,7 @@ def test_context_budget_elides_old_observations_first():
 
 def test_config_loads_serving_section():
     cfg = StudentServingConfig.load("configs/models.yaml")
-    assert cfg.max_context_tokens == 65536 and cfg.base_url.startswith("http")
+    assert cfg.max_context_tokens >= 65536 and cfg.base_url.startswith("http") and cfg.api_key_env
 
 
 def test_routing():

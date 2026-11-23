@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .. import policies
-from ..agent import run_agent
+from ..agent import run_agent, student_options
 from ..env import RepoEnv
 from ..grader import GradeResult, grade
 from ..schema import Action, Demo, Step, load_demos, save_demos
@@ -51,7 +51,7 @@ EXPLORE_TOOLS = {"view_file", "search", "find_files", "run_tests"}
 # Instance-level metadata carried from the source demo to its rollouts (trajectory-specific keys
 # such as num_steps / files_changed / replay_ok are not carried over).
 INSTANCE_META_KEYS = ("bug_type", "difficulty", "language", "public", "cluster_id", "patch_size",
-                      "flaky", "split", "repo_group")
+                      "flaky", "split", "repo_group", "hidden_beyond_issue", "source_instance")
 
 DROP_REASONS = ("unresolved", "no_tests_before_submit", "leak_unsurfaced_first_edit",
                 "leak_no_exploration", "leak_thought_mentions", "duplicate", "over_cap")
@@ -328,7 +328,10 @@ def rollout_instance(policy_factory: PolicyFactory, demo: Demo, root=".", k: int
             if hint_level > 0:
                 policy = HintedPolicy(policy, hint, hint_level)
             with RepoEnv(_repo_path(demo, root), demo.base_commit, backend=backend) as env:
-                res = run_agent(policy, env, demo.problem_statement, demo.test_cmd, max_steps)
+                # The teacher works under the student's prompt + submit gate, so its trajectories
+                # demonstrate the behaviour the student is trained (and prompted) to show.
+                res = run_agent(policy, env, demo.problem_statement, demo.test_cmd, max_steps,
+                                options=student_options())
             traj, patch = res.trajectory, res.patch
             served = sorted(getattr(policy, "served_models", None) or [])
             g = grade_fn(demo, patch, root)

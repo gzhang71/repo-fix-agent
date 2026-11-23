@@ -782,6 +782,9 @@ def _build_mutant(demo: Demo, m: Mutation, files: dict[str, str], mutated: str, 
             "difficulty": _difficulty(m.operator, len(f2p), n_src, test_imports),
             "files_changed": [m.file], "num_steps": 0, "language": demo.metadata.get("language", "python"),
             "issue_writer": "llm" if llm is not None else ("repro" if symptom else "template"),
+            # hidden failing tests beyond the one symptom the issue shows: the "fix the example,
+            # miss the rest of the contract" cases the baseline student fails on (docs/BASELINE.md)
+            "hidden_beyond_issue": max(0, len(failing) - 1),
         },
     )
 

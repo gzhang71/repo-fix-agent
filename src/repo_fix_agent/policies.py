@@ -13,6 +13,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Protocol
 
+from .llm_cache import cached_call
 from .schema import Action, Step
 from .tools import TOOLS
 
@@ -74,7 +75,7 @@ class AnthropicPolicy:
             self._pending_tool_id, prev_obs = tid, st.observation
 
     def _call(self):
-        resp = self.client.beta.messages.create(
+        kwargs = dict(
             model=self.model,
             max_tokens=self.max_tokens,
             system=self.system,
@@ -84,11 +85,15 @@ class AnthropicPolicy:
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": self.effort},
             messages=self.messages,
+            # Automatic prompt caching: the breakpoint follows the growing conversation, so each
+            # step re-reads the previous steps from cache instead of paying full input price.
+            cache_control={"type": "ephemeral"},
             # Server-side fallback on safety-classifier refusals. Remove if you need strict
             # single-model provenance for distillation data.
             betas=["server-side-fallback-2026-07-01"],
             extra_body={"fallbacks": "default"},
         )
+        resp = cached_call("anthropic:beta.messages", kwargs, lambda: self.client.beta.messages.create(**kwargs))
         self.served_models.add(resp.model)
         return resp
 
@@ -126,7 +131,7 @@ class _ChatCompletionsPolicy:
     produce, so what the student sees at inference matches what it was fine-tuned on.
     """
 
-    def __init__(self, model: str, client, request_kwargs: dict | None = None):
+    def __init__(self, model: str, client, request_kwargs: dict | None = None, keep_reasoning: bool = False):
         from .sft import tools_as_functions
 
         self.client = client
@@ -134,6 +139,10 @@ class _ChatCompletionsPolicy:
         self.request_kwargs = request_kwargs or {}
         self.tools = tools_as_functions()
         self.served_models: set[str] = set()
+        # Reasoning models on vLLM / SGLang / Fireworks return their thinking in a separate
+        # `reasoning_content` (or `reasoning`) field. Keeping it (as the step's thought, and sent
+        # back in later turns) lets the model continue its plan instead of re-deriving it.
+        self.keep_reasoning = keep_reasoning
 
     def reset(self, system: str, task: str) -> None:
         self.messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": task}]
@@ -149,9 +158,12 @@ class _ChatCompletionsPolicy:
             if self._pending_tool_id is not None:
                 self.messages.append({"role": "tool", "tool_call_id": self._pending_tool_id, "content": prev_obs})
             tid = f"prefix_{i}"
-            self.messages.append({"role": "assistant", "content": st.thought, "tool_calls": [{
+            msg = {"role": "assistant", "content": "" if self.keep_reasoning else st.thought, "tool_calls": [{
                 "id": tid, "type": "function",
-                "function": {"name": st.action.tool, "arguments": json.dumps(st.action.args)}}]})
+                "function": {"name": st.action.tool, "arguments": json.dumps(st.action.args)}}]}
+            if self.keep_reasoning and st.thought:
+                msg["reasoning_content"] = st.thought
+            self.messages.append(msg)
             self._pending_tool_id, prev_obs = tid, st.observation
 
     def act(self, last_observation: str | None) -> tuple[str, Action]:
@@ -161,17 +173,22 @@ class _ChatCompletionsPolicy:
             self._pending_tool_id = None
 
         for _ in range(3):
-            resp = self.client.chat.completions.create(
-                model=self.model, messages=self._prepare_messages(), tools=self.tools,
-                tool_choice="auto", parallel_tool_calls=False, **self.request_kwargs)
+            kwargs = dict(model=self.model, messages=self._prepare_messages(), tools=self.tools,
+                          tool_choice="auto", parallel_tool_calls=False, **self.request_kwargs)
+            resp = cached_call(f"chat:{getattr(self.client, 'base_url', '')}", kwargs,
+                               lambda: self.client.chat.completions.create(**kwargs))
             self.served_models.add(resp.model)
             msg = resp.choices[0].message
-            thought = (msg.content or "").strip()
+            reasoning = reasoning_of(msg) if self.keep_reasoning else ""
+            thought = "\n".join(x for x in (reasoning, (msg.content or "").strip()) if x)
             if msg.tool_calls:
                 tc = msg.tool_calls[0]
-                self.messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": [{
+                out = {"role": "assistant", "content": msg.content or "", "tool_calls": [{
                     "id": tc.id, "type": "function",
-                    "function": {"name": tc.function.name, "arguments": tc.function.arguments}}]})
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments}}]}
+                if reasoning:
+                    out["reasoning_content"] = reasoning
+                self.messages.append(out)
                 self._pending_tool_id = tc.id
                 try:
                     args = json.loads(tc.function.arguments or "{}")
@@ -181,10 +198,25 @@ class _ChatCompletionsPolicy:
                 if not isinstance(args, dict):
                     args = {"_invalid_json": tc.function.arguments}
                 return thought, Action(tc.function.name, args)
-            self.messages.append({"role": "assistant", "content": msg.content or ""})
+            out = {"role": "assistant", "content": msg.content or ""}
+            if reasoning:
+                out["reasoning_content"] = reasoning
+            self.messages.append(out)
             self.messages.append({"role": "user", "content":
                 "Continue by calling one of the tools. Call `submit` when the fix is verified."})
         return "No tool call after retries.", Action("submit", {})
+
+
+def reasoning_of(msg) -> str:
+    """Separate reasoning text from an OpenAI-format message (`reasoning_content` on vLLM /
+    SGLang / Fireworks / DeepSeek, `reasoning` on some others); "" if absent."""
+    for name in ("reasoning_content", "reasoning"):
+        v = getattr(msg, name, None)
+        if v is None and getattr(msg, "model_extra", None):
+            v = msg.model_extra.get(name)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
 
 
 class OpenAIPolicy(_ChatCompletionsPolicy):
@@ -214,6 +246,13 @@ class StudentServingConfig:
     chars_per_token: float = 3.5             # rough estimate for budgeting; tune per tokenizer
     keep_recent_observations: int = 3        # never elide the N most recent tool outputs
     temperature: float = 0.0                 # 0 for eval; raise for RL / best-of-n sampling
+    keep_reasoning: bool = True              # record + resend the model's reasoning_content
+    spec_check: bool = True                  # behaviour/edge-case checklist in the system prompt
+    submit_gate: bool = True                 # bounce one unverified submit per episode
+
+    def agent_options(self):
+        from .agent import AgentOptions
+        return AgentOptions(spec_check=self.spec_check, submit_gate=self.submit_gate)
 
     @classmethod
     def load(cls, path: str | Path = "configs/models.yaml") -> "StudentServingConfig":
@@ -246,7 +285,9 @@ class LocalModelPolicy(_ChatCompletionsPolicy):
 
             client = OpenAI(base_url=self.cfg.base_url, api_key=os.environ.get(self.cfg.api_key_env, "EMPTY"))
         super().__init__(self.cfg.model_name, client,
-                         {"max_tokens": self.cfg.max_new_tokens, "temperature": self.cfg.temperature})
+                         {"max_tokens": self.cfg.max_new_tokens, "temperature": self.cfg.temperature},
+                         keep_reasoning=self.cfg.keep_reasoning)
+        self.agent_options = self.cfg.agent_options()
 
     def _tokens(self, msgs: list[dict]) -> int:
         return estimate_tokens(msgs, self.tools, self.cfg.chars_per_token)
@@ -280,13 +321,14 @@ def apply_context_budget(messages: list[dict], tools: list[dict], cfg: StudentSe
     return msgs
 
 
-def make_policy(model: str) -> Policy:
+def make_policy(model: str, temperature: float | None = None) -> Policy:
     """Route a model id to its backend.
 
     claude-*        -> AnthropicPolicy (teacher)
     gpt-* / o<N>*   -> OpenAIPolicy (teacher)
     student         -> LocalModelPolicy using student.serving in configs/models.yaml
     student:<name>  -> same, overriding model_name
+    `temperature` overrides the student's sampling temperature (teachers sample at their default).
     """
     if model.startswith("claude-"):
         return AnthropicPolicy(model=model)
@@ -296,5 +338,7 @@ def make_policy(model: str) -> Policy:
         cfg = StudentServingConfig.load()
         if ":" in model:
             cfg.model_name = model.split(":", 1)[1]
+        if temperature is not None:
+            cfg.temperature = temperature   # sampling for pass@k / best-of-n / RL
         return LocalModelPolicy(cfg)
     raise ValueError(f"No backend for {model!r}. Use claude-*, gpt-*, or student[:<served-model-name>].")

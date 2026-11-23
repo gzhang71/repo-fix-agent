@@ -13,19 +13,25 @@ from .schema import Demo, iter_demos
 from .tools import TOOLS
 
 
-def render_messages(demo: Demo) -> list[dict]:
+def render_messages(demo: Demo, system_prompt: str | None = None, reasoning_field: bool = False) -> list[dict]:
+    """`system_prompt` defaults to SYSTEM_PROMPT; pass the student's (AgentOptions.system_prompt())
+    so training matches inference. `reasoning_field` puts each thought in `reasoning_content`
+    (how reasoning students return and receive it) instead of `content`."""
     msgs: list[dict] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
         {"role": "user", "content": build_task(demo.problem_statement, demo.test_cmd)},
     ]
     for i, step in enumerate(demo.trajectory):
         call_id = f"call_{i}"
-        msgs.append({
+        msg = {
             "role": "assistant",
-            "content": step.thought,
+            "content": "" if reasoning_field else step.thought,
             "tool_calls": [{"id": call_id, "type": "function", "function": {
                 "name": step.action.tool, "arguments": json.dumps(step.action.args)}}],
-        })
+        }
+        if reasoning_field and step.thought:
+            msg["reasoning_content"] = step.thought
+        msgs.append(msg)
         msgs.append({"role": "tool", "tool_call_id": call_id, "content": step.observation})
     return msgs
 

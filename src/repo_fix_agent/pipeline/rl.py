@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from ..agent import SYSTEM_PROMPT, build_task
+from ..agent import SubmitGate, build_task, student_options
 from ..schema import Action, Demo, Step, load_demos
 from .parallel import pmap
 from .verifier import (ExcludedInstanceError, check_not_excluded, load_exclude_ids, parse_patch,
@@ -78,6 +78,7 @@ class RepoFixEnv:
         from ..grader import grade
 
         self.root, self.max_steps, self.backend = root, max_steps, backend
+        self.options = student_options()   # RL trains the student: its prompt + submit gate
         self.cfg = reward_config or RewardConfig()
         self.grade_fn = grade_fn or grade
         self.env = None
@@ -97,14 +98,19 @@ class RepoFixEnv:
             replayed.append(Step(st.thought, st.action, self.env.execute(st.action)))
         self.trajectory, self.n_prefix, self.done = list(replayed), len(replayed), False
         task = build_task(demo.problem_statement, demo.test_cmd)
-        return task, {"system": SYSTEM_PROMPT, "task": task, "instance_id": demo.instance_id,
+        self.gate = SubmitGate(self.options.submit_gate)
+        for st in replayed:
+            self.gate.observe(st.action.tool, st.action.args or {})
+        return task, {"system": self.options.system_prompt(), "task": task, "instance_id": demo.instance_id,
                       "prefix": replayed, "prefix_steps": len(replayed),
                       "last_observation": replayed[-1].observation if replayed else None}
 
     def step(self, action: Action, thought: str = "") -> tuple[str, float, bool, dict[str, Any]]:
         if self.done or self.env is None:
             raise RuntimeError("episode is done; call reset()")
-        obs = self.env.execute(action)
+        nudge = self.gate.intercept(action.tool)   # same submit gate as inference (run_agent)
+        obs = nudge if nudge is not None else self.env.execute(action)
+        self.gate.observe(action.tool, action.args or {})
         self.trajectory.append(Step(thought, action, obs))
         submitted = self.env.done
         if not submitted and len(self.trajectory) < self.max_steps:
