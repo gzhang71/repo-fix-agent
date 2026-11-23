@@ -30,7 +30,7 @@ from .sft import export_sft
 
 PIPELINE_MODULES = ["audit", "split", "distill", "sft_data", "aux_tasks", "preferences",
                     "verifier", "rl", "retrieval", "augment", "onpolicy", "training",
-                    "difficulty"]
+                    "difficulty", "teacher_signal"]
 
 
 def _policy(model: str):

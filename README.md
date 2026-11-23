@@ -30,7 +30,7 @@ The seed set is close to its ceiling. Add harder instances before relying on sma
 pip install -e '.[teacher,openai]'      # optional extras: embed, voyage, secrets
 cp .env.example .env                    # fill in ANTHROPIC_API_KEY, FIREWORKS_API_KEY (gitignored)
 docker build -f docker/sandbox.Dockerfile -t repo-fix-sandbox:py3.12 docker   # the sandbox
-python -m pytest -q                     # 424 tests, offline (no API calls)
+python -m pytest -q                     # 434 tests, offline (no API calls)
 ```
 
 * Keys load from `.env` automatically; variables already set in your shell win.
@@ -131,6 +131,20 @@ where the student's pass rate p is low, not by which model solved an instance:
 `sft-mix --instance-weights` applies the weights and caps the summed weight per instance at 3, so
 an instance with many recorded runs can't dominate.
 
+**Distillation depends on what the teacher exposes** (`repo-fix distill-signal` prints the
+chosen mode and why; set in `configs/models.yaml` → `distillation_signal`):
+
+| Mode | Teacher exposes | Student needs | Training |
+|---|---|---|---|
+| `action` | only its text and tool calls | - | SFT on the teacher's action at states the student reached, DPO where they disagree |
+| `reasoning` | its reasoning text | - | the same, plus the reasoning as a target: in the student's `reasoning_content` if it has one, otherwise in `content`. Summarized reasoning gets weight 0.5, raw reasoning 1.0 |
+| `topk` | per-token log-probs through an API | same tokenizer | `token-distill` has the teacher score the student's own tokens; `--objective tokenkl` (per-token reverse KL + top-k forward KL) |
+| `logits` | full logits (weights on your GPU box) | same tokenizer | `--objective gkd --teacher-base ...` (full-distribution KL; `--gkd-beta` 1 = reverse, 0 = forward) |
+
+Claude returns summarized thinking and no log-probs, so with the current config the mode is
+`reasoning`. Token-level modes need a teacher from the student's model family (same token ids),
+for example a larger same-family model on Fireworks. `student-train --signal` adds the matching stages.
+
 **Training runs outside this repo.** Fireworks' managed SFT/DPO stopped taking new jobs on
 2026-11-09. The exported JSONL fits their Training API, or use the bundled
 `scripts/train_lora.py` (transformers + PEFT; SFT, DPO and policy-gradient objectives) on a GPU.
@@ -147,7 +161,7 @@ One command per proposal in `docs/DEMO_DATA_PROPOSALS.md`:
 | Training data | `distill`, `mix`, `sft-mix`, `aux-tasks`, `prefs`, `augment`, `onpolicy-distill`, `difficulty-weights` |
 | Verification and RL | `verifier-train`, `best-of-n`, `rl-rollouts` |
 | Retrieval | `retrieval-index`, `retrieve` (hybrid TF-IDF + embeddings) |
-| Training | `export-chat-ft`, `fireworks-deploy`, `student-train` |
+| Training | `distill-signal`, `token-distill`, `export-chat-ft`, `fireworks-deploy`, `student-train` |
 
 ## Layout
 
@@ -166,12 +180,13 @@ src/repo_fix_agent/
   llm_cache.py    record/replay cache for paid calls
   envfile.py      .env loader
   sft.py          demo -> chat SFT example
+  chat_spans.py   chat-template rendering with per-token loss weights (pipeline + train_lora)
   pipeline/       audit split distill sft_data aux_tasks preferences verifier rl retrieval augment
-                  repro embed parallel rerank onpolicy training difficulty
+                  repro embed parallel rerank onpolicy training difficulty teacher_signal
   web/            `repo-fix serve`: jobs, GitHub forge, HTTP server, static UI
 scripts/
   build_seed_dataset.py, seed_specs/     the 100 seed instances
-  train_lora.py                          LoRA SFT / DPO / policy-gradient training
+  train_lora.py                          LoRA training: sft, dpo, pg (GRPO), tokenkl, gkd
   eval_retrieval_paraphrase.py           retrieval backend comparison
 docker/sandbox.Dockerfile                sandbox image
 data/demos/seed.jsonl, data/repos/       100 validated demos + their repos

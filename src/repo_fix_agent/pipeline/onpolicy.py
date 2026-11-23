@@ -50,6 +50,8 @@ class Relabel:
     teacher_thought: str
     teacher_action: Action
     agree: bool
+    teacher_reasoning: str = ""    # the reasoning channel alone (thinking / reasoning_content), if exposed
+    teacher_text: str | None = None   # the visible text alone; None = unknown (teacher_thought holds both)
 
 
 # ---- prompting --------------------------------------------------------------------------------
@@ -79,10 +81,13 @@ def teacher_task(demo: Demo, prefix: list[Step]) -> list[dict]:
 
 
 def teacher_action(teacher_factory: Callable[[], object], demo: Demo, prefix: list[Step],
-                   options: AgentOptions) -> tuple[str, Action]:
+                   options: AgentOptions) -> tuple[str, Action, str, str | None]:
+    """-> (thought, action, reasoning, text). Policies that expose their channels separately set
+    last_reasoning / last_text; otherwise reasoning is "" and text is None (unknown)."""
     pol = teacher_factory()
     pol.reset(options.system_prompt(), teacher_task(demo, prefix))   # content blocks work for both APIs
-    return pol.act(None)
+    thought, action = pol.act(None)
+    return thought, action, getattr(pol, "last_reasoning", "") or "", getattr(pol, "last_text", None)
 
 
 # ---- agreement --------------------------------------------------------------------------------
@@ -124,17 +129,20 @@ def relabel_rollout(rollout: Demo, teacher_factory: Callable[[], object], every:
     for t in states_to_relabel(rollout, every, max_relabels):
         prefix = rollout.trajectory[:t]
         st = rollout.trajectory[t] if t < len(rollout.trajectory) else None
-        thought, action = teacher_action(teacher_factory, rollout, prefix, options)
+        thought, action, reasoning, text = teacher_action(teacher_factory, rollout, prefix, options)
         out.append(Relabel(t, st.thought if st else "", st.action if st else None, thought, action,
-                           actions_agree(st.action if st else None, action)))
+                           actions_agree(st.action if st else None, action), reasoning, text))
     return out
 
 
 # ---- outputs ------------------------------------------------------------------------------------
 def to_sft_records(rollout: Demo, relabels: list[Relabel], cfg: StudentServingConfig | None = None,
-                   agree_weight: float = 0.3, include_agreeing: bool = True) -> list[dict]:
+                   agree_weight: float = 0.3, include_agreeing: bool = True, signal=None) -> list[dict]:
     """Student-format conversation up to each relabeled state, then the teacher's action as the
-    only trained turn (loss_mask True on it alone). Same rendering as sft-mix records."""
+    only trained turn (loss_mask True on it alone). Same rendering as sft-mix records.
+    `signal` (teacher_signal.SignalPlan) decides what happens to the teacher's reasoning: action
+    mode trains on the visible text + tool call only; reasoning mode also trains on the reasoning,
+    placed where the student keeps its own and weighted by plan.reasoning_weight."""
     cfg = cfg or StudentServingConfig()
     tools = sft.tools_as_functions()
     sys_prompt = cfg.agent_options().system_prompt()
@@ -144,11 +152,17 @@ def to_sft_records(rollout: Demo, relabels: list[Relabel], cfg: StudentServingCo
             continue
         prefix_demo = replace(rollout, trajectory=rollout.trajectory[:r.step])
         msgs = sft.render_messages(prefix_demo, sys_prompt, reasoning_field=cfg.keep_reasoning)
-        target = {"role": "assistant", "content": "" if cfg.keep_reasoning else r.teacher_thought,
-                  "tool_calls": [{"id": f"call_{r.step}", "type": "function", "function": {
-                      "name": r.teacher_action.tool, "arguments": json.dumps(r.teacher_action.args)}}]}
-        if cfg.keep_reasoning and r.teacher_thought:
-            target["reasoning_content"] = r.teacher_thought
+        call = [{"id": f"call_{r.step}", "type": "function", "function": {
+            "name": r.teacher_action.tool, "arguments": json.dumps(r.teacher_action.args)}}]
+        if signal is not None and r.teacher_text is not None:
+            from .teacher_signal import shape_target
+
+            target = {**shape_target(r.teacher_reasoning, r.teacher_text, signal), "tool_calls": call}
+        else:   # channels unknown: previous behaviour (whole thought as reasoning or content)
+            target = {"role": "assistant", "content": "" if cfg.keep_reasoning else r.teacher_thought,
+                      "tool_calls": call}
+            if cfg.keep_reasoning and r.teacher_thought:
+                target["reasoning_content"] = r.teacher_thought
         msgs = apply_context_budget(msgs, tools, cfg) + [target]
         parent = rollout.metadata.get("parent_id") or rollout.instance_id
         recs.append({
@@ -158,16 +172,18 @@ def to_sft_records(rollout: Demo, relabels: list[Relabel], cfg: StudentServingCo
             "weight": agree_weight if r.agree else 1.0,
             "source": "onpolicy-distill",
             "meta": {"parent_id": parent, "state": r.step, "agree": r.agree,
-                     "student_resolved": rollout.metadata.get("resolved")},
+                     "student_resolved": rollout.metadata.get("resolved"),
+                     "signal": signal.mode if signal is not None else None},
         })
     return recs
 
 
-def to_step_pairs(rollout: Demo, relabels: list[Relabel], cfg: StudentServingConfig | None = None) -> list[dict]:
+def to_step_pairs(rollout: Demo, relabels: list[Relabel], cfg: StudentServingConfig | None = None,
+                  signal=None) -> list[dict]:
     """DPO pairs at disagreement states: chosen = teacher action, rejected = student action."""
     cfg = cfg or StudentServingConfig()
     pairs = []
-    for rec, r in zip(to_sft_records(rollout, relabels, cfg), relabels):
+    for rec, r in zip(to_sft_records(rollout, relabels, cfg, signal=signal), relabels):
         if r.agree or r.student_action is None:
             continue
         rejected = {"role": "assistant", "content": "" if cfg.keep_reasoning else r.student_thought,
@@ -201,13 +217,13 @@ def estimate(rollouts: list[Demo], every: int, max_relabels: int | None, chars_p
 
 def onpolicy_distill(rollouts: list[Demo], teacher_factory: Callable[[], object], every: int = 1,
                      max_relabels: int | None = None, workers: int = 1, cfg: StudentServingConfig | None = None,
-                     agree_weight: float = 0.3) -> tuple[list[dict], list[dict], dict]:
+                     agree_weight: float = 0.3, signal=None) -> tuple[list[dict], list[dict], dict]:
     cfg = cfg or StudentServingConfig()
     options = cfg.agent_options()
 
     def one(r: Demo):
         rel = relabel_rollout(r, teacher_factory, every, max_relabels, options)
-        return to_sft_records(r, rel, cfg, agree_weight), to_step_pairs(r, rel, cfg), rel
+        return to_sft_records(r, rel, cfg, agree_weight, signal=signal), to_step_pairs(r, rel, cfg, signal), rel
 
     results = pmap(one, rollouts, workers)
     sft_recs = [x for s, _, _ in results for x in s]
@@ -242,8 +258,20 @@ def cmd_onpolicy(a) -> int:
     from ..policies import make_policy
 
     cfg = StudentServingConfig.load(a.config) if Path(a.config).exists() else StudentServingConfig()
+    from .teacher_signal import default_caps, load_caps, select_mode
+
+    t_caps, s_caps = load_caps(a.config)
+    if t_caps.name != a.teacher:
+        t_caps = default_caps(a.teacher)
+    signal = select_mode(t_caps, s_caps, a.signal if a.signal in ("action", "reasoning") else None)
+    if signal.mode not in ("action", "reasoning"):   # token modes have their own data path; relabels use reasoning
+        signal = select_mode(t_caps, s_caps, "reasoning" if t_caps.reasoning != "none" else "action")
+    if a.reasoning_weight is not None:
+        signal.reasoning_weight = a.reasoning_weight
+    print(f"signal: {signal.mode} (reasoning -> {signal.reasoning_target}, weight {signal.reasoning_weight})",
+          file=sys.stderr)
     recs, pairs, stats = onpolicy_distill(rollouts, lambda: make_policy(a.teacher), a.every, a.max_relabels,
-                                          a.workers, cfg, a.agree_weight)
+                                          a.workers, cfg, a.agree_weight, signal)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text("".join(json.dumps(r) + "\n" for r in recs))
     if a.pairs_out:
@@ -263,6 +291,10 @@ def register(subparsers) -> None:
     p.add_argument("--max-relabels", type=int, default=8, help="per episode cap (spread evenly)")
     p.add_argument("--only-unresolved", action="store_true", help="relabel only episodes the student failed")
     p.add_argument("--agree-weight", type=float, default=0.3, help="loss weight where student already agreed")
+    p.add_argument("--signal", choices=["auto", "action", "reasoning"], default="auto",
+                   help="train on the teacher's reasoning too (reasoning) or its action only; auto = from distill-signal")
+    p.add_argument("--reasoning-weight", type=float, default=None,
+                   help="override the reasoning loss weight (default 1.0 for full reasoning, 0.5 for summarized)")
     p.add_argument("--instance-weights", default=None, help="difficulty-weights JSON (focus on low pass rates)")
     p.add_argument("--max-pass-rate", type=float, default=0.75,
                    help="with --instance-weights: relabel only instances the student solves at most this often")

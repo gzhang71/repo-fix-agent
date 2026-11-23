@@ -7,6 +7,42 @@ Accuracy is "resolved" on the 100 seed demos unless stated; per-instance results
 
 ## [Unreleased]: student improvements (implemented, not run)
 
+### Distillation by teacher signal (implemented, not run)
+- **Question it answers:** a teacher may expose its reasoning, its token log-probs or its full
+  logits, and the student may or may not have a reasoning channel. Each case trains differently.
+- **`distill-signal`:** reads `distillation_signal` in `models.yaml` and picks the richest mode the
+  pair supports, explaining why richer modes are out:
+  - `action`: only the teacher's output.
+  - `reasoning`: its reasoning text too.
+  - `topk`: per-token log-probs, same tokenizer.
+  - `logits`: local weights, same tokenizer.
+- **Teacher reasoning is now recorded apart from its visible text** (`last_reasoning` /
+  `last_text` on the policies).
+  - `onpolicy-distill --signal action|reasoning`: action mode trains on the visible text and tool
+    call only.
+  - Reasoning mode places the reasoning in the student's `reasoning_content`, or in `content` for
+    a student without one, with its own loss weight: 0.5 for summarized (Claude), 1.0 for raw.
+  - `train_lora.py` weights reasoning tokens apart from action tokens inside the same message.
+    The chat-FT export has one weight per message, so it drops the split.
+- **`token-distill`** (topk): renders student episodes with the student's chat template and gets
+  the teacher's prompt log-probs (OpenAI-compatible `/completions`, `echo` + `logprobs`, cached).
+  - It aligns the teacher's tokens to the student's by offset and text, and refuses if trained
+    tokens don't match (a different tokenizer).
+  - Dry run unless `--yes`. `--render-only` writes chat records for GKD (free).
+- **`train_lora.py` objectives:**
+  - `tokenkl`: per-token reverse KL as a policy gradient with reward log p_T − log p_S, plus
+    forward KL on the teacher's top-k.
+  - `gkd`: full-distribution KL / JSD against a local teacher; checks that the vocabularies match.
+- **Verified offline:**
+  - `gkd_loss` equals the reference KL in both directions and drives a toy student toward the
+    teacher. `tokenkl` raises the student's probability of the tokens the teacher rates likely.
+  - Both objectives trained end to end on a tiny HF model, with token-level data from a
+    simulated same-tokenizer teacher (774/774 trained tokens aligned).
+- **`student-train --signal auto|action|reasoning|topk|logits`:**
+  - topk adds the stages `token-distill` and `train-token`.
+  - logits adds `render-rollouts` and `train-gkd`.
+  - An unsupported mode exits with the reason. With Claude, auto selects `reasoning`.
+
 ### Difficulty-aware data weighting (implemented, free)
 - **Question it answers:** train on what the teacher solves and the student doesn't, or on both?
   Answer: both, weighted by the student's own pass rate p, measured over several samples.
@@ -33,7 +69,7 @@ Motivation (from the baseline analysis below):
 - **Regressions:** 5 broke a hidden test even though every visible test passed.
 - **Reasoning:** 76% of student turns had no visible reasoning.
 
-No paid API calls were made for this entry; all of it is covered by offline tests (424 passing).
+No paid API calls were made for this entry; all of it is covered by offline tests (434 passing).
 
 ### No training needed
 - **Reasoning replay:** `keep_reasoning`. The student's `reasoning_content` was silently dropped

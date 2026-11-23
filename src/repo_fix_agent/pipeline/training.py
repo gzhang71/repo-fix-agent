@@ -41,7 +41,9 @@ def to_chat_ft(record: dict) -> dict:
     mask = record.get("loss_mask") or [m.get("role") == "assistant" for m in record["messages"]]
     msgs = []
     for m, train in zip(record["messages"], mask):
-        m = dict(m)
+        # sub-message reasoning weights are a train_lora.py feature; the chat-FT schema has one
+        # weight per message, so they are dropped here (the whole message keeps the message weight)
+        m = {k: v for k, v in m.items() if k not in ("reasoning_weight", "reasoning_text")}
         if m.get("role") == "assistant":
             m["weight"] = round(w, 4) if train else 0
         msgs.append(m)
@@ -129,11 +131,16 @@ class Stage:
 
 
 def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, samples: int = 4,
-         teacher: str = "claude-opus-5-5", base_model_hf: str = "<HF id of the student base>") -> list[Stage]:
+         teacher: str = "claude-opus-5-5", base_model_hf: str = "<HF id of the student base>",
+         signal: str = "reasoning", teacher_weights: str = "<HF id of the teacher>") -> list[Stage]:
+    """`signal` (teacher_signal.select_mode) picks the distillation path: action / reasoning use
+    on-policy relabels; topk adds teacher log-prob scoring + a tokenkl step; logits adds a GKD step
+    against the teacher's weights."""
     r, m = round_dir, str(splits / "frozen_test.manifest.json")
     train, dev = str(splits / "train.jsonl"), str(splits / "dev.jsonl")
     rollouts = prev_rollouts or str(r / "student_rollouts.jsonl")
-    return [
+    relabel_signal = signal if signal in ("action", "reasoning") else "auto"
+    stages = [
         Stage("augment", "synthetic bug-injected instances from train repos (edge-case tagged)",
               ["augment", train, "--out", str(r / "synthetic.jsonl"), "--repos-dir", str(r / "repos_synth"),
                "--max-per-demo", "2", "--exclude-ids", m]),
@@ -158,7 +165,7 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
               paid="Claude: about $0.05 x synthetic instances", needs=["augment"]),
         Stage("onpolicy", "teacher relabels states the student reached (DAgger); + step DPO pairs",
               ["onpolicy-distill", "--rollouts", rollouts, "--teacher", teacher, "--exclude-ids", m,
-               "--instance-weights", str(r / "weights.json"), "--max-pass-rate", "0.75",
+               "--instance-weights", str(r / "weights.json"), "--max-pass-rate", "0.75", "--signal", relabel_signal,
                "--out", str(r / "onpolicy_sft.jsonl"), "--pairs-out", str(r / "onpolicy_pairs.jsonl")],
               paid="Claude: run with --dry-run first for the exact estimate", needs=["student-rollouts", "weights"]),
         Stage("aux", "verifiable auxiliary tasks (localization, test writing, repro, critique)",
@@ -207,6 +214,36 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
                                          f"{r / 'lora_dpo'} --data {r / 'rl_batch.jsonl'} --objective pg "
                                          f"--out {r / 'lora_rl'}", needs=["rl-rollouts"]),
     ]
+    extra: list[Stage] = []
+    if signal == "topk":
+        extra = [
+            Stage("token-distill", "same-tokenizer teacher scores the student's own episodes (per-token log-probs)",
+                  ["token-distill", "--rollouts", rollouts, "--exclude-ids", m, "--yes",
+                   "--out", str(r / "token_distill.jsonl")],
+                  paid="teacher prompt tokens on the scoring endpoint (estimate printed first)",
+                  needs=["student-rollouts"]),
+            Stage("train-token", "token-level on-policy distillation (reverse KL + top-k forward KL)", None,
+                  paid="GPU hours", external=f"python scripts/train_lora.py --base {base_model_hf} --adapter "
+                                             f"{r / 'lora_dpo'} --objective tokenkl --data {r / 'token_distill.jsonl'} "
+                                             f"--out {r / 'lora_tok'}", needs=["train-dpo", "token-distill"]),
+        ]
+    elif signal == "logits":
+        extra = [
+            Stage("render-rollouts", "student episodes as chat records for GKD",
+                  ["token-distill", "--rollouts", rollouts, "--render-only", "--exclude-ids", m,
+                   "--out", str(r / "rollout_records.jsonl")], needs=["student-rollouts"]),
+            Stage("train-gkd", "GKD: full-distribution KL to the teacher's weights on the student's episodes", None,
+                  paid="GPU hours (teacher + student loaded)",
+                  external=f"python scripts/train_lora.py --base {base_model_hf} --adapter {r / 'lora_dpo'} "
+                           f"--objective gkd --teacher-base {teacher_weights} --data {r / 'rollout_records.jsonl'} "
+                           f"--out {r / 'lora_gkd'}", needs=["train-dpo", "render-rollouts"]),
+        ]
+    if extra:
+        at = next(i for i, st in enumerate(stages) if st.name == "train-dpo") + 1
+        stages[at:at] = extra
+        deploy = next(st for st in stages if st.name == "deploy")
+        deploy.needs = [extra[-1].name]
+    return stages
 
 
 def format_plan(stages: list[Stage]) -> str:
@@ -245,10 +282,20 @@ def cmd_deploy(a) -> int:
 
 
 def cmd_student_train(a) -> int:
+    from .teacher_signal import load_caps, select_mode
+
     round_dir = Path(a.runs) / a.round
-    stages = plan(round_dir, Path(a.splits), a.rollouts, a.samples, a.teacher, a.base_model)
+    t_caps, s_caps = load_caps(a.config)
+    try:
+        sig = select_mode(t_caps, s_caps, None if a.signal == "auto" else a.signal)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    stages = plan(round_dir, Path(a.splits), a.rollouts, a.samples, a.teacher, a.base_model, sig.mode,
+                  t_caps.weights or "<HF id of the teacher>")
     if not a.run:
-        print(f"Student training round {a.round!r} (outputs in {round_dir}); nothing is run without --run.\n")
+        print(f"Student training round {a.round!r} (outputs in {round_dir}); nothing is run without --run.")
+        print(f"Distillation signal: {sig.mode} (repo-fix distill-signal explains why)\n")
         print(format_plan(stages))
         return 0
     st = next((s for s in stages if s.name == a.run), None)
@@ -289,6 +336,9 @@ def register(subparsers) -> None:
     t.add_argument("--samples", type=int, default=4)
     t.add_argument("--teacher", default="claude-opus-5-5")
     t.add_argument("--base-model", default="<HF id of the student base>", help="HF weights for scripts/train_lora.py")
+    t.add_argument("--signal", default="auto", choices=["auto", "action", "reasoning", "topk", "logits"],
+                   help="distillation path; auto = richest the teacher/student pair supports")
+    t.add_argument("--config", default="configs/models.yaml")
     t.add_argument("--run", default=None, help="stage name to execute")
     t.add_argument("--yes", action="store_true", help="allow a paid stage")
     t.set_defaults(fn=cmd_student_train)

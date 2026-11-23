@@ -74,3 +74,28 @@ teacher:
     samples_per_instance: 4               # rejection sampling: keep only test-verified trajectories
     max_steps: 40
     temperature_note: "Opus 5.5 rejects sampling params; diversity comes from multiple samples"
+
+distillation_signal:
+  # What each model exposes decides the distillation method (`repo-fix distill-signal` explains):
+  #   action     teacher gives only text + tool calls  -> SFT/DPO on its actions at the student's states
+  #   reasoning  teacher exposes reasoning text        -> also train the student on that reasoning
+  #   topk       per-token log-probs via an API        -> token-level on-policy distillation (tokenkl)
+  #   logits     full logits from local weights        -> GKD (full-distribution KL)
+  # topk / logits need teacher and student to share a tokenizer (same token ids).
+  teacher:
+    name: claude-opus-5-5
+    reasoning: summarized        # adaptive thinking returns summarized thinking
+    logprobs: none               # the Claude API returns no log-probs
+  student:
+    reasoning: full              # the student returns raw reasoning_content (see serving.keep_reasoning)
+    tokenizer: null              # HF tokenizer id of the student; required for topk / logits
+  # Same-family open teacher on an OpenAI-compatible endpoint that returns prompt log-probs (topk):
+  # teacher:
+  #   name: accounts/fireworks/models/<larger model with the student's tokenizer>
+  #   reasoning: full
+  #   logprobs: topk
+  #   top_k: 5
+  #   tokenizer: <same HF id as the student>
+  #   base_url: https://api.fireworks.ai/inference/v1
+  #   api_key_env: FIREWORKS_API_KEY
+  # Teacher weights on the training box (logits): logprobs: full, weights: <HF id>, tokenizer: <same>.

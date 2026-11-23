@@ -111,10 +111,12 @@ class AnthropicPolicy:
                 return "Model refused.", Action("submit", {})
             self.messages.append({"role": "assistant", "content": resp.content})
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
-            thought = "\n".join(
-                [getattr(b, "thinking", "") for b in resp.content if b.type == "thinking"]
-                + [b.text for b in resp.content if b.type == "text"]
-            ).strip()
+            # Kept apart for distillation: the reasoning channel (summarized thinking on this
+            # model) and the visible text are trained differently (pipeline/teacher_signal.py).
+            self.last_reasoning = "\n".join(getattr(b, "thinking", "") for b in resp.content
+                                            if b.type == "thinking").strip()
+            self.last_text = "\n".join(b.text for b in resp.content if b.type == "text").strip()
+            thought = "\n".join(x for x in (self.last_reasoning, self.last_text) if x)
             if tool_uses:
                 tu = tool_uses[0]
                 self._pending_tool_id = tu.id
@@ -179,7 +181,8 @@ class _ChatCompletionsPolicy:
                                lambda: self.client.chat.completions.create(**kwargs))
             self.served_models.add(resp.model)
             msg = resp.choices[0].message
-            reasoning = reasoning_of(msg) if self.keep_reasoning else ""
+            self.last_reasoning, self.last_text = reasoning_of(msg), (msg.content or "").strip()
+            reasoning = self.last_reasoning if self.keep_reasoning else ""
             thought = "\n".join(x for x in (reasoning, (msg.content or "").strip()) if x)
             if msg.tool_calls:
                 tc = msg.tool_calls[0]
