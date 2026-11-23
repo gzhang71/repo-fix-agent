@@ -250,7 +250,8 @@ def test_edge_case_weight_and_extra_records(pag, tmp_path):
 def test_plan_paid_stages_need_yes(tmp_path, capsys):
     stages = T.plan(tmp_path / "r1", tmp_path / "splits")
     names = [s.name for s in stages]
-    assert names[:4] == ["augment", "student-rollouts", "weights", "distill"] and "onpolicy" in names
+    assert names[:2] == ["augment", "student-rollouts"] and names.index("weights") < names.index("distill")
+    assert "onpolicy" in names
     assert names.index("rl-weights") < names.index("rl-rollouts") < names.index("train-rl")
     assert not next(s for s in stages if s.name == "weights").paid
     assert all(s.paid for s in stages if s.name in ("student-rollouts", "distill", "onpolicy", "deploy"))

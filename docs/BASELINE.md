@@ -86,10 +86,10 @@ the last edit as a check. Running the existing suite no longer counts. Run `2026
 - **The gate:** fired in 60 episodes, and 55 of them were then solved.
 - **v2 → v3:** 6 instances fixed (`seed-037`, `044`, `063`, `066`, `070`, `099`), 1 newly failed
   (`seed-023`).
-- **Paired comparison:** at temperature 0 the LLM cache replays v2's responses until the gate
-  changes an episode (1,077 live calls). Each episode is the same as in v2 up to that point, so
-  the difference is the gate's effect, not sampling noise. A multi-sample run is still the way to
-  measure absolute accuracy.
+- **Not fully paired (corrected 2026-11-23):** this was described as a paired comparison, with
+  each episode replaying v2's cached responses until the gate fired. In fact tool output
+  contained run-to-run noise (`ls -la` dates, pytest durations, memory addresses), so most
+  episodes left the cache at an observation, not at the gate. Part of the +5 is sampling noise.
 - **What's left:** "broke a passing test" (5) is now the largest failure mode, followed by
   running out of steps (3).
 
@@ -105,9 +105,48 @@ budget. Run `20261123-084357-10f3f2`.
 | Ran out of steps | 3 | 4 |
 | Episodes over 32 steps | 15 | 14 |
 
-- **Paired comparison:** the notice can only change episodes that reach step 33, so the other
-  episodes replay v3's cached responses.
+- **Not fully paired (corrected):** as with v3, noisy tool output let episodes diverge long
+  before step 33, so the −2 is within noise.
 - **Flips:** 2 fixed (`seed-023`, `seed-068`), 4 newly failed (`seed-037`, `051`, `063`, `094`).
 - **Conclusion:** no sign the countdown helps; the student keeps working rather than wrapping up.
 - **Response:** the notice is off, and the student's budget is raised from 40 to 50 steps
   (`student.serving.max_steps`).
+
+## 2026-11-23: student baseline v5 (50-step budget, measured), and a correction
+
+v5 changes one thing from v3: the student's step budget goes from 40 to 50 (the notice stays
+off). Run `20261123-143114-69deb5`.
+
+| | v3 | v5 |
+|---|---|---|
+| Resolved | 88 | 85 |
+| easy / medium / hard | 84 / 91 / 86% | 81 / 91 / 76% |
+| Ran out of steps | 3 | 2 |
+| Solved after step 40 | – | 1 |
+
+- **Flips:** 1 fixed (`seed-023`), 4 newly failed (`seed-025`, `037`, `094`, `095`).
+- **Why most of those can't be the budget:** three of the four newly failed instances never
+  reached step 40, so the budget can't have caused them.
+
+**Correction: the scaffold comparisons weren't paired.** I expected v5 to replay v3 exactly up to
+step 40, since requests are identical and temperature is 0. Comparing the stored episodes instead:
+- **69 of 100** diverged at an *observation*: the same action produced different tool output.
+- **The causes:** `ls -la` timestamps, pytest durations ("in 0.12s"), object addresses (`0xffff…`)
+  and process counts.
+- **The effect:** a different observation is a different prompt, so it misses the cache, gets a
+  fresh response, and the episode goes its own way.
+
+So v2→v3 (+5), v3→v4 (−2) and v3→v5 (−3) all include ordinary sampling noise. With one sample per
+instance, differences of a few points can't be attributed to the change. With these masked, 40
+episodes would have been identical and most of the rest would have diverged much later.
+
+**Fix:** `RepoEnv.execute` now masks dates, timestamps, durations and memory addresses in tool
+output before the model sees it (`env.normalize_observation`). Grading doesn't use this path.
+
+**What still holds:**
+- **The repro gate's behaviour change:** scratch-script use rose from 37 to 85 episodes, and
+  partial fixes fell. That's a behaviour shift, not one noisy number.
+- **The scores themselves:** every run sits in 83–88%.
+
+**What to decide with:** a multi-sample run (`--samples 3` or more), or several paired runs now
+that observations are deterministic.

@@ -1,0 +1,32 @@
+{"id": "py-dedupe", "category": "python", "prompt": "Write a Python function that removes duplicates from a list while preserving order. Include a short docstring."}
+{"id": "py-generator", "category": "python", "prompt": "Explain the difference between a list comprehension and a generator expression in Python, with one example of when each is the better choice."}
+{"id": "py-context", "category": "python", "prompt": "Write a context manager in Python that times the block it wraps and prints the elapsed seconds."}
+{"id": "py-dataclass", "category": "python", "prompt": "Convert this class to a dataclass and explain what changes:\n\nclass Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\n    def __repr__(self):\n        return f'Point({self.x}, {self.y})'"}
+{"id": "py-typing", "category": "python", "prompt": "Add type hints to this function and explain any choices:\n\ndef group_by(items, key):\n    out = {}\n    for it in items:\n        out.setdefault(key(it), []).append(it)\n    return out"}
+{"id": "py-asyncio", "category": "python", "prompt": "Show how to run three HTTP-like coroutines concurrently with asyncio and collect their results in order."}
+{"id": "debug-keyerror", "category": "debugging", "prompt": "This raises KeyError sometimes. Why, and how would you fix it?\n\ncounts = {}\nfor w in words:\n    counts[w] += 1"}
+{"id": "debug-float", "category": "debugging", "prompt": "Why does 0.1 + 0.2 == 0.3 evaluate to False in Python, and how should money amounts be handled instead?"}
+{"id": "debug-recursion", "category": "debugging", "prompt": "A recursive function works for small inputs but crashes with RecursionError for n=5000. Give two ways to fix it."}
+{"id": "debug-race", "category": "debugging", "prompt": "Explain what a race condition is using a bank-balance example, and show one way to prevent it in Python threads."}
+{"id": "js-closure", "category": "javascript", "prompt": "What does this print and why?\n\nfor (var i = 0; i < 3; i++) { setTimeout(() => console.log(i), 0); }\n\nHow would you make it print 0, 1, 2?"}
+{"id": "js-promise", "category": "javascript", "prompt": "Rewrite this callback-style function using async/await:\n\nfunction load(id, cb) { fetchUser(id, (err, u) => { if (err) return cb(err); fetchPosts(u, cb); }); }"}
+{"id": "sql-join", "category": "sql", "prompt": "Write a SQL query that lists each customer with their total order amount, including customers with no orders (show 0 for them). Tables: customers(id, name), orders(id, customer_id, amount)."}
+{"id": "sql-index", "category": "sql", "prompt": "When does adding an index make a query slower overall? Give two concrete cases."}
+{"id": "algo-two-sum", "category": "algorithms", "prompt": "Solve two-sum (return indices of two numbers adding to a target) in O(n) time in Python, and explain the idea in two sentences."}
+{"id": "algo-bigo", "category": "algorithms", "prompt": "What is the time complexity of building a heap from n elements, and why is it not O(n log n)?"}
+{"id": "algo-bfs", "category": "algorithms", "prompt": "Write breadth-first search on a grid to find the shortest path length from start to goal, where '#' cells are walls."}
+{"id": "git-undo", "category": "tools", "prompt": "I committed to main by mistake but haven't pushed. How do I move that commit to a new branch and reset main?"}
+{"id": "git-rebase", "category": "tools", "prompt": "Explain git rebase versus git merge for updating a feature branch, and when you'd avoid rebasing."}
+{"id": "shell-find", "category": "tools", "prompt": "Give a shell command that finds all .log files larger than 10 MB under the current directory and prints their sizes."}
+{"id": "regex-email", "category": "tools", "prompt": "Write a regex that matches simple email addresses, and list two kinds of valid addresses it would wrongly reject."}
+{"id": "design-cache", "category": "design", "prompt": "Design an LRU cache with O(1) get and put. Describe the data structures, then give a Python implementation."}
+{"id": "design-api", "category": "design", "prompt": "What makes a REST endpoint idempotent? Which HTTP methods should be idempotent, and how do idempotency keys help with POST?"}
+{"id": "review-pr", "category": "review", "prompt": "Review this function and list concrete problems:\n\ndef avg(xs):\n    total = 0\n    for x in xs: total += x\n    return total / len(xs)"}
+{"id": "test-write", "category": "testing", "prompt": "Write pytest tests for a function slugify(text) that lowercases, trims, and replaces runs of non-alphanumeric characters with a single hyphen."}
+{"id": "test-mock", "category": "testing", "prompt": "How do you test a function that calls time.time() so the test is deterministic? Show an example with unittest.mock."}
+{"id": "explain-gil", "category": "concepts", "prompt": "In three or four sentences, what is Python's GIL and when does it matter for performance?"}
+{"id": "explain-http", "category": "concepts", "prompt": "What happens, step by step, between typing a URL in a browser and the page appearing? Keep it under 150 words."}
+{"id": "math-prob", "category": "reasoning", "prompt": "Two dice are rolled. What is the probability that the sum is at least 10? Show the counting."}
+{"id": "reason-logic", "category": "reasoning", "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much is the ball? Explain briefly."}
+{"id": "format-json", "category": "instructions", "prompt": "Return a JSON object with keys 'language', 'paradigms' (a list) and 'year' for the Python programming language. Output only the JSON."}
+{"id": "format-bullets", "category": "instructions", "prompt": "Summarize the benefits of code review in exactly three bullet points of at most twelve words each."}

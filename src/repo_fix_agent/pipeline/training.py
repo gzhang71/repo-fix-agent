@@ -132,7 +132,8 @@ class Stage:
 
 def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, samples: int = 4,
          teacher: str = "claude-opus-5-5", base_model_hf: str = "<HF id of the student base>",
-         signal: str = "reasoning", teacher_weights: str = "<HF id of the teacher>") -> list[Stage]:
+         signal: str = "reasoning", teacher_weights: str = "<HF id of the teacher>",
+         prev_round_dir: Path | None = None) -> list[Stage]:
     """`signal` (teacher_signal.select_mode) picks the distillation path: action / reasoning use
     on-policy relabels; topk adds teacher log-prob scoring + a tokenkl step; logits adds a GKD step
     against the teacher's weights."""
@@ -140,6 +141,11 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
     train, dev = str(splits / "train.jsonl"), str(splits / "dev.jsonl")
     rollouts = prev_rollouts or str(r / "student_rollouts.jsonl")
     relabel_signal = signal if signal in ("action", "reasoning") else "auto"
+    rnd = r.name
+    before_label, after_label = f"{rnd} dev before", f"{rnd} dev after"
+    # anti-forgetting anchor on every training step (retention.py): KL to the base on retention records
+    retain = f"--retain-data {r / 'retain.jsonl'} --retain-data {r / 'retain_general.jsonl'} --retain-beta 0.1"
+    replay = ["--replay", str(prev_round_dir / "sft.jsonl")] if prev_round_dir else []
     stages = [
         Stage("augment", "synthetic bug-injected instances from train repos (edge-case tagged)",
               ["augment", train, "--out", str(r / "synthetic.jsonl"), "--repos-dir", str(r / "repos_synth"),
@@ -148,6 +154,15 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
               ["eval", train, "--model", "student", "--samples", str(samples), "--temperature", "0.7",
                "--workers", "8", "--out", str(r / "student_eval.jsonl"), "--save-rollouts", rollouts],
               paid="Fireworks inference (student tokens; cheap)"),
+        Stage("dev-before", "current student on the dev split, 3 samples: the reference for the forgetting gate",
+              ["eval", dev, "--model", "student", "--samples", "3", "--temperature", "0.7", "--workers", "8",
+               "--label", before_label], paid="Fireworks inference"),
+        Stage("retain-set", "retention records: the student's own resolved episodes from before training",
+              ["retain-set", "--rollouts", rollouts, "--exclude-ids", m, "--out", str(r / "retain.jsonl")],
+              needs=["student-rollouts"]),
+        Stage("retain-general", "retention records: the base student's answers to 32 general prompts",
+              ["retain-set", "--general", "--yes", "--out", str(r / "retain_general.jsonl")],
+              paid="Fireworks inference (32 short calls)"),
         Stage("weights", "per-instance student pass rate -> bucket (gap / learning / mastered / unsolved) "
                          "and SFT weight max(0.2, 1 - p)",
               ["difficulty-weights", str(r / "student_eval.jsonl"), "--out", str(r / "weights.json")],
@@ -175,29 +190,35 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
                "--out-dpo", str(r / "prefs.jsonl"), "--out-steps", str(r / "prefs_steps.jsonl"),
                "--balance-lengths", "--exclude-ids", m], needs=["student-rollouts", "distill"]),
         Stage("sft-mix", "engineer + teacher + student successes + on-policy + aux; weighted by difficulty "
-                         "(1 - student pass rate, floor 0.2, capped per instance), edge cases 2x",
+                         "(1 - student pass rate, floor 0.2, capped per instance), edge cases 2x"
+                         + ("; 20% replayed from " + prev_round_dir.name if prev_round_dir else ""),
               ["sft-mix", "--engineer", train, "--teacher", str(r / "teacher.jsonl"), str(r / "teacher_synth.jsonl"),
                "--aux", str(r / "aux.jsonl"), "--extra-records", str(r / "onpolicy_sft.jsonl"),
                "--student-rollouts", rollouts, "--instance-weights", str(r / "weights.json"),
-               "--edge-case-weight", "2.0", "--exclude-ids", m, "--out", str(r / "sft.jsonl")],
+               "--edge-case-weight", "2.0", "--exclude-ids", m, *replay, "--out", str(r / "sft.jsonl")],
               needs=["distill", "distill-synthetic", "aux", "onpolicy", "weights"]),
         Stage("export", "chat fine-tuning JSONL (Fireworks/OpenAI schema, per-message weights)",
               ["export-chat-ft", str(r / "sft.jsonl"), "--out", str(r / "chat_ft.jsonl")], needs=["sft-mix"]),
-        Stage("train-sft", "LoRA SFT on a GPU box (or the Fireworks Training API with chat_ft.jsonl)", None,
+        Stage("train-sft", "LoRA SFT with the retention KL anchor, on a GPU box", None,
               paid="GPU hours", external=f"python scripts/train_lora.py --base {base_model_hf} "
-                                         f"--data {r / 'chat_ft.jsonl'} --objective sft --out {r / 'lora_sft'}",
-              needs=["export"]),
+                                         f"--data {r / 'chat_ft.jsonl'} --objective sft {retain} --out {r / 'lora_sft'}",
+              needs=["export", "retain-set", "retain-general"]),
         Stage("train-dpo", "DPO on prefs + on-policy pairs from the SFT checkpoint", None, paid="GPU hours",
               external=f"python scripts/train_lora.py --base {base_model_hf} --adapter {r / 'lora_sft'} "
                        f"--objective dpo --data {r / 'prefs.jsonl'} --data {r / 'prefs_steps.jsonl'} "
-                       f"--data {r / 'onpolicy_pairs.jsonl'} --out {r / 'lora_dpo'}",
+                       f"--data {r / 'onpolicy_pairs.jsonl'} {retain} --out {r / 'lora_dpo'}",
               needs=["train-sft", "prefs"]),
         Stage("deploy", "serve the fine-tuned student (then set student.serving.model_name)",
               ["fireworks-deploy", "--model", "accounts/<acct>/models/<fine-tuned-id>"],
               paid="Fireworks on-demand GPU per hour (dry run unless --yes)", needs=["train-dpo"]),
         Stage("eval", "new student on the dev split, 3 samples (decide with mean pass@1)",
               ["eval", dev, "--model", "student", "--samples", "3", "--temperature", "0.7", "--workers", "8",
-               "--out", str(r / "dev_eval.jsonl")], paid="Fireworks inference", needs=["deploy"]),
+               "--label", after_label], paid="Fireworks inference", needs=["deploy"]),
+        Stage("forgetting-gate", "previously solved dev instances must stay solved (<= 5% forgotten), accuracy "
+                                 "must not drop, tool errors must not rise; on failure, interpolate the adapter "
+                                 "toward the base (scripts/interpolate_lora.py --alpha 0.5) and re-evaluate",
+              ["forgetting-check", "--before", before_label, "--after", after_label],
+              needs=["eval", "dev-before"]),
         Stage("post-rollouts", f"fine-tuned student on train, {samples} samples/instance (pass rates moved)",
               ["eval", train, "--model", "student", "--samples", str(samples), "--temperature", "0.7",
                "--workers", "8", "--out", str(r / "post_eval.jsonl")],
@@ -210,13 +231,13 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
               ["rl-rollouts", train, "--model", "student", "--group-size", "8", "--workers", "8",
                "--pass-rates", str(r / "pass_rates.json"), "--reward", "shaped", "--dynamic-sampling",
                "--exclude-ids", m, "--out", str(r / "rl_batch.jsonl")],
-              paid="Fireworks inference (8 episodes per instance)", needs=["eval", "rl-weights"]),
-        Stage("train-rl", "clipped policy gradient (GRPO advantages, clip-higher, token-level loss) + KL, "
-                          "2 passes over the batch, then redeploy", None,
+              paid="Fireworks inference (8 episodes per instance)", needs=["forgetting-gate", "rl-weights"]),
+        Stage("train-rl", "clipped policy gradient (GRPO advantages, clip-higher, token-level loss) + KL + "
+                          "retention anchor, 2 passes; then redeploy, re-run eval and the forgetting gate", None,
               paid="GPU hours", external=f"python scripts/train_lora.py --base {base_model_hf} --adapter "
                                          f"{r / 'lora_dpo'} --data {r / 'rl_batch.jsonl'} --objective pg "
                                          f"--loss-agg token --clip-low 0.2 --clip-high 0.28 --epochs 2 "
-                                         f"--out {r / 'lora_rl'}", needs=["rl-rollouts"]),
+                                         f"{retain} --out {r / 'lora_rl'}", needs=["rl-rollouts"]),
     ]
     extra: list[Stage] = []
     if signal == "topk":
@@ -229,7 +250,7 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
             Stage("train-token", "token-level on-policy distillation (reverse KL + top-k forward KL)", None,
                   paid="GPU hours", external=f"python scripts/train_lora.py --base {base_model_hf} --adapter "
                                              f"{r / 'lora_dpo'} --objective tokenkl --data {r / 'token_distill.jsonl'} "
-                                             f"--out {r / 'lora_tok'}", needs=["train-dpo", "token-distill"]),
+                                             f"{retain} --out {r / 'lora_tok'}", needs=["train-dpo", "token-distill"]),
         ]
     elif signal == "logits":
         extra = [
@@ -240,7 +261,7 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
                   paid="GPU hours (teacher + student loaded)",
                   external=f"python scripts/train_lora.py --base {base_model_hf} --adapter {r / 'lora_dpo'} "
                            f"--objective gkd --teacher-base {teacher_weights} --data {r / 'rollout_records.jsonl'} "
-                           f"--out {r / 'lora_gkd'}", needs=["train-dpo", "render-rollouts"]),
+                           f"{retain} --out {r / 'lora_gkd'}", needs=["train-dpo", "render-rollouts"]),
         ]
     if extra:
         at = next(i for i, st in enumerate(stages) if st.name == "train-dpo") + 1
@@ -296,7 +317,8 @@ def cmd_student_train(a) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     stages = plan(round_dir, Path(a.splits), a.rollouts, a.samples, a.teacher, a.base_model, sig.mode,
-                  t_caps.weights or "<HF id of the teacher>")
+                  t_caps.weights or "<HF id of the teacher>",
+                  Path(a.runs) / a.prev_round if a.prev_round else None)
     if not a.run:
         print(f"Student training round {a.round!r} (outputs in {round_dir}); nothing is run without --run.")
         print(f"Distillation signal: {sig.mode} (repo-fix distill-signal explains why)\n")
@@ -343,6 +365,7 @@ def register(subparsers) -> None:
     t.add_argument("--signal", default="auto", choices=["auto", "action", "reasoning", "topk", "logits"],
                    help="distillation path; auto = richest the teacher/student pair supports")
     t.add_argument("--config", default="configs/models.yaml")
+    t.add_argument("--prev-round", default=None, help="earlier round (e.g. r1): replay 20%% of its SFT data")
     t.add_argument("--run", default=None, help="stage name to execute")
     t.add_argument("--yes", action="store_true", help="allow a paid stage")
     t.set_defaults(fn=cmd_student_train)

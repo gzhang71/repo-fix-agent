@@ -17,12 +17,14 @@ demos, teacher distillation (off- and on-policy), preference learning, and RL.
 | | Model | Seed set (100) |
 |---|---|---|
 | Teacher | `claude-opus-5-5` | **98%** resolved, 5.5 steps, about $0.04 per instance |
-| Student | `nemotron-lightning-3p5-30b-a3b` (Fireworks, 30B MoE, ~3B active) | **88%** resolved, 24.0 steps (85% before the scaffold changes) |
+| Student | `nemotron-lightning-3p5-30b-a3b` (Fireworks, 30B MoE, ~3B active) | **83–88%** resolved across scaffold variants (best 88%, repro-only submit gate; one sample each) |
 
 Student failures are mostly fixes that cover only the issue's example and miss the rest of the
-behaviour, not tool misuse (see BASELINE.md). The no-training scaffold is measured: the
-repro-only submit gate took the student from 85% to 88% and cut partial fixes from 8 to 3. The
-training steps in CHANGELOG "Unreleased" are implemented and tested offline but not yet run.
+behaviour, not tool misuse (see BASELINE.md). The no-training scaffold is measured: with the
+repro-only submit gate, scratch-script use rose from 37 to 85 episodes and partial fixes fell.
+Single-sample scores have ranged from 83% to 88% across scaffold variants, so differences of a few
+points are within noise (see the correction in BASELINE.md). The training steps in CHANGELOG
+"Unreleased" are implemented and tested offline but not yet run.
 The seed set is close to its ceiling. Add harder instances before relying on small gains.
 
 ## Architecture
@@ -84,8 +86,10 @@ flowchart TD
 ```
 
 Every model call goes through the LLM cache (`llm_cache.py`). A repeated request replays the
-recorded response, which is why a scaffold change can be measured as a paired comparison. The
-hidden tests are applied only after the agent finishes, so it can neither see nor edit them.
+recorded response. Tool output is normalized first (dates, durations and memory addresses
+masked), so two runs stay identical until a change actually alters an episode, which makes
+scaffold changes measurable as paired comparisons. The hidden tests are applied only after the
+agent finishes, so it can neither see nor edit them.
 
 ### Training round
 
@@ -140,7 +144,7 @@ flowchart TD
 pip install -e '.[teacher,openai]'      # optional extras: embed, voyage, secrets
 cp .env.example .env                    # fill in ANTHROPIC_API_KEY, FIREWORKS_API_KEY (gitignored)
 docker build -f docker/sandbox.Dockerfile -t repo-fix-sandbox:py3.12 docker   # the sandbox
-python -m pytest -q                     # 451 tests, offline (no API calls)
+python -m pytest -q                     # 460 tests, offline (no API calls)
 ```
 
 * Keys load from `.env` automatically; variables already set in your shell win.
@@ -295,6 +299,17 @@ Claude returns summarized thinking and no log-probs, so with the current config 
 `reasoning`. Token-level modes need a teacher from the student's model family (same token ids),
 for example a larger same-family model on Fireworks. `student-train --signal` adds the matching stages.
 
+**Catastrophic forgetting.** Five defences keep a fine-tune from erasing what the student
+already does well (details in `pipeline/retention.py`):
+1. **LoRA only:** the base weights never change.
+2. **A retention anchor on every training step** (`--retain-data`): a KL penalty against the base
+   model on the student's own pre-training successes, and on its answers to 32 general prompts.
+3. **Replay** of the previous round's data (`--prev-round`).
+4. **A forgetting gate after each round** (`forgetting-check`): previously solved instances must
+   stay solved, accuracy must not drop, and tool errors must not rise.
+5. **Adapter interpolation** toward the base (`scripts/interpolate_lora.py`) if a fine-tune fails
+   the gate.
+
 **Training runs outside this repo.** Fireworks' managed SFT/DPO stopped taking new jobs on
 2026-11-09. The exported JSONL fits their Training API, or use the bundled
 `scripts/train_lora.py` (transformers + PEFT; SFT, DPO and policy-gradient objectives) on a GPU.
@@ -338,7 +353,8 @@ src/repo_fix_agent/
   web/            `repo-fix serve`: jobs, GitHub forge, HTTP server, static UI
 scripts/
   build_seed_dataset.py, seed_specs/     the 100 seed instances
-  train_lora.py                          LoRA training: sft, dpo, pg (GRPO), tokenkl, gkd
+  train_lora.py                          LoRA training: sft, dpo, pg (GRPO), tokenkl, gkd; retention KL anchor
+  interpolate_lora.py                    scale an adapter toward the base (WiSE-FT)
   eval_retrieval_paraphrase.py           retrieval backend comparison
 docker/sandbox.Dockerfile                sandbox image
 data/demos/seed.jsonl, data/repos/       100 validated demos + their repos

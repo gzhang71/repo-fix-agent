@@ -7,9 +7,57 @@ Accuracy is "resolved" on the 100 seed demos unless stated; per-instance results
 
 ## [Unreleased]: student improvements
 
+**Measured 2026-11-23, v5** (`20261123-143114-69deb5`): with a **50-step budget** the student
+scored 85/100, vs 88 for v3. Three of the four newly failed instances never reached step 40.
+
+**Correction:** the v3, v4 and v5 comparisons below were described as paired. They weren't.
+- **What happened:** tool output had run-to-run noise (`ls -la` dates, pytest durations, memory
+  addresses), so 69 of 100 episodes left the LLM cache at an observation.
+- **What it means:** the +5 / −2 / −3 include sampling noise.
+- **The fix:** observations are now normalized (`env.normalize_observation`), so future scaffold
+  comparisons replay until the change actually matters.
+- **What still holds:** the behaviour shifts (repro scripts 37 → 85 episodes, fewer partial
+  fixes).
+- Details in `docs/BASELINE.md`.
+
+### Catastrophic forgetting (implemented, not run)
+- **Before:**
+  - LoRA kept the base weights frozen.
+  - RL had a KL penalty to the base, and DPO used the base as its reference.
+  - Already-solved instances were replayed at 0.2 weight.
+  - Nothing anchored SFT, nothing kept general ability, nothing carried earlier rounds forward,
+    and nothing checked for forgetting before deployment.
+- **Retention anchor** (`train_lora.py --retain-data --retain-beta 0.1 --retain-every 4`):
+  - Penalises the exact KL(p_adapter ‖ p_base) on retention records, interleaved with any
+    objective.
+  - The base is the same model with the adapter off, so there's no second copy.
+- **`retain-set`:** builds the retention records from two sources.
+  - The student's own resolved episodes from before training: free, from rollouts or a run in the
+    database.
+  - The base student's answers to 32 bundled general prompts (`data/retention/general_prompts.jsonl`,
+    13 categories): 32 cheap calls, dry run unless `--yes`.
+- **Replay across rounds:** `sft-mix --replay prev/sft.jsonl --replay-frac 0.2`, and
+  `student-train --prev-round r1`.
+- **Forgetting gate:** `forgetting-check --before <run> --after <run>` fails, with exit code 1,
+  when:
+  - more than 5% of previously solved instances now fail,
+  - accuracy drops, or
+  - tool errors per step rise.
+- **Weight interpolation:** `scripts/interpolate_lora.py --alpha 0.5` scales the adapter toward
+  the base (WiSE-FT), the fix when a fine-tune gains on the task but fails the gate.
+- **`student-train` stages:**
+  - `dev-before`, `retain-set` and `retain-general`.
+  - The retention anchor on every training stage.
+  - `forgetting-gate` after the post-training eval, before RL.
+- **Verified offline:**
+  - The anchor is exactly zero with no drift, positive with drift, and its gradient flows into
+    the adapter.
+  - SFT with the anchor and adapter interpolation both ran end to end on a tiny model.
+  - The gate's report was checked against a constructed before/after pair.
+
 **Measured 2026-11-23, v4** (`20261123-084357-10f3f2`): the **steps-left notice** scored 86/100,
 vs 88 for v3.
-- **Paired comparison:** only episodes over 32 steps could change.
+- **Not fully paired (see the correction above):** noisy tool output let episodes diverge early.
 - **Result:** 2 instances fixed, 4 newly failed, and running out of steps went from 3 to 4. The
   student mostly ignores the countdown.
 - **Response:**
@@ -25,9 +73,9 @@ student scored **88/100**, vs 83 for v2 and 85 for v1.
 - **Scratch scripts:** used in 85 of 100 episodes, up from 37.
 - **Failure modes:** partial fixes fell from 8 to 3. Mean steps rose from 20.4 to 24.0.
 - **Hard instances:** 86%, up from 71%.
-- **A paired comparison:** at temperature 0, v3 replays v2's cached responses until the gate
-  first fires (1,077 live calls vs 2,047). Every difference is downstream of the gate, so the
-  +5 is attributable to it rather than to sampling noise.
+- **Not fully paired (see the correction above):** fewer live calls (1,077 vs 2,047) because
+  of cache replays, but most episodes left the cache at a noisy observation. Part of the +5 is
+  noise.
 - **Backtest dashboard:** `runs/dashboard.html`, regenerated after every eval.
 
 **Measured 2026-11-23, v2** (details in `docs/BASELINE.md`):

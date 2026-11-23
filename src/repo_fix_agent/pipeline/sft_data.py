@@ -572,6 +572,14 @@ def cmd_sft_mix(a) -> int:
             rec = render_record(d, cfg, "student-self", f"{instance_key(d)}#self{d.metadata.get('sample_idx', 0)}")
             rec["meta"] = {"parent_id": instance_key(d)}
             records.append(rec)
+    if a.replay:   # earlier rounds' training records, so this round doesn't overwrite them
+        from .retention import replay_sample
+
+        prev = [r for path in a.replay for r in read_jsonl(path)]
+        check_excluded(prev, exclude, "replay records")
+        rep = replay_sample(prev, len(records), a.replay_frac, a.replay_weight, a.seed)
+        records += rep
+        print(json.dumps({"replay": {"available": len(prev), "added": len(rep)}}))
     if a.instance_weights:
         from .difficulty import apply_instance_weights, load_weights
 
@@ -603,6 +611,10 @@ def register(subparsers) -> None:
     p.add_argument("--unknown-weight", type=float, default=1.0, help="weight for instances with no pass-rate measurement")
     p.add_argument("--max-weight-per-instance", type=float, default=3.0,
                    help="cap on the summed loss weight of one instance's records (0 = no cap)")
+    p.add_argument("--replay", nargs="+", default=None,
+                   help="previous rounds' sft.jsonl: replay a sample so earlier training isn't overwritten")
+    p.add_argument("--replay-frac", type=float, default=0.2, help="share of the final mix taken from --replay")
+    p.add_argument("--replay-weight", type=float, default=1.0, help="loss-weight multiplier for replayed records")
     p.add_argument("--aux-frac", type=float, default=0.2, help="max share of total tokens for aux tasks")
     p.add_argument("--backfill-model", default=None, help="teacher model for thought backfill")
     p.add_argument("--collapse-noops", action="store_true", help="drop no-op steps (re-executes demos)")

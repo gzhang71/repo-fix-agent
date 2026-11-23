@@ -133,6 +133,19 @@ def tokenkl_loss(model, r: dict, max_len: int, adv_clip: float, topk_coef: float
     return loss
 
 
+def retain_kl(model, ids, weights, torch):
+    """Anti-forgetting anchor: KL(p_adapter || p_base) over the trained positions of a retention
+    record, exact over the vocabulary. The base is this same model with the LoRA adapter off, so
+    no second copy is loaded. Zero when the adapter leaves these predictions unchanged."""
+    mask = weights != 0
+    if not mask.any():
+        return None
+    s = all_logps(model, ids, torch)[mask]
+    with torch.no_grad(), model.disable_adapter():
+        b = all_logps(model, ids, torch)[mask]
+    return (s.exp() * (s - b)).sum(-1).mean()
+
+
 def gkd_loss(model, teacher, ids, weights, beta: float, torch):
     """Generalized JSD between student and teacher next-token distributions at trained positions.
     beta=1: reverse KL(p_S || p_T) (mode-seeking; the usual on-policy choice); beta=0: forward
@@ -178,6 +191,10 @@ def main() -> int:
     ap.add_argument("--topk-coef", type=float, default=0.5, help="tokenkl: weight of the top-k forward-KL term")
     ap.add_argument("--teacher-base", default=None, help="gkd: HF id/path of the teacher (same tokenizer)")
     ap.add_argument("--gkd-beta", type=float, default=1.0, help="gkd: 1 = reverse KL, 0 = forward KL, else JSD")
+    ap.add_argument("--retain-data", action="append", default=None,
+                    help="retention records (repo-fix retain-set): penalise drift from the base on them (repeatable)")
+    ap.add_argument("--retain-beta", type=float, default=0.1, help="weight of the retention KL term")
+    ap.add_argument("--retain-every", type=int, default=4, help="one retention record every N training records")
     ap.add_argument("--chat-template-file", default=None, help="override the tokenizer's chat template (Jinja)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-examples", type=int, default=None)
@@ -239,16 +256,40 @@ def main() -> int:
                     old_lp[i] = token_logps(model, ids, torch).detach().to("cpu", torch.float32)
         for k in range(0, len(order), a.grad_accum):   # trained tokens per accumulation window
             window_tokens.append(max(1, sum(sum(1 for x in pg_cache[j][1][1:] if x) for j in order[k:k + a.grad_accum])))
+    retain = load_jsonl(a.retain_data) if a.retain_data else []
+    random.Random(a.seed + 1).shuffle(retain)
+    retain_state = {"i": 0, "kl": 0.0, "n": 0}
+
+    def retain_step() -> None:
+        """Add one retention record's KL to the current accumulation window."""
+        if not retain or a.retain_beta <= 0:
+            return
+        r = retain[retain_state["i"] % len(retain)]
+        retain_state["i"] += 1
+        mask = r.get("loss_mask") or [m.get("role") == "assistant" for m in r["messages"]]
+        ids, tw = enc.encode(r["messages"], [1.0 if x else 0.0 for x in mask], r.get("tools") or tools_default)
+        kl = retain_kl(model, ids, torch.tensor(tw[1:], device=model.device), torch)
+        if kl is not None:
+            (a.retain_beta * kl / a.grad_accum).backward()
+            retain_state["kl"] += float(kl)
+            retain_state["n"] += 1
+
     model.train()
     running, skipped = 0.0, 0
 
     def _maybe_step(step: int) -> None:
         nonlocal running
+        if retain and step % max(1, a.retain_every) == 0:
+            retain_step()
         if step % a.grad_accum == 0 or step == len(order):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             opt.zero_grad(set_to_none=True)
-            print(f"step {step}/{len(order)}  loss {running / a.grad_accum:.4f}", flush=True)
+            extra = ""
+            if retain_state["n"]:
+                extra = f"  retain_kl {retain_state['kl'] / retain_state['n']:.5f}"
+                retain_state.update(kl=0.0, n=0)
+            print(f"step {step}/{len(order)}  loss {running / a.grad_accum:.4f}{extra}", flush=True)
             running = 0.0
     for step, idx in enumerate(order, 1):
         r = records[idx]
