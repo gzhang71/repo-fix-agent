@@ -69,3 +69,26 @@ Run `20261123-075428-8b10cb` in `runs/repofix.sqlite`.
   edge cases, so the gate as designed can't catch them.
 - **Steps:** the scaffold adds about 3 steps per solved episode. Two regressions (`seed-063`,
   `seed-070`) ran out of steps without submitting.
+
+## 2026-11-23: student baseline v3 (repro-only submit gate, measured)
+
+The only change from v2: the submit gate counts only a run of a `scratch_*.py` repro script after
+the last edit as a check. Running the existing suite no longer counts. Run `20261123-081218-7a82b0`.
+
+| | v1 | v2 | v3 |
+|---|---|---|---|
+| Resolved | 85 | 83 | **88** |
+| easy / medium / hard | 78 / 89 / 86% | 81 / 89 / 71% | 84 / 91 / 86% |
+| Mean steps (all) | 16.6 | 20.4 | 24.0 |
+| Episodes with a scratch script | - | 37 | 85 |
+| Partial fixes among failures | 10 | 8 | 3 |
+
+- **The gate:** fired in 60 episodes, and 55 of them were then solved.
+- **v2 → v3:** 6 instances fixed (`seed-037`, `044`, `063`, `066`, `070`, `099`), 1 newly failed
+  (`seed-023`).
+- **Paired comparison:** at temperature 0 the LLM cache replays v2's responses until the gate
+  changes an episode (1,077 live calls). Each episode is the same as in v2 up to that point, so
+  the difference is the gate's effect, not sampling noise. A multi-sample run is still the way to
+  measure absolute accuracy.
+- **What's left:** "broke a passing test" (5) is now the largest failure mode, followed by
+  running out of steps (3).

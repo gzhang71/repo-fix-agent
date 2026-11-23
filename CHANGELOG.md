@@ -7,7 +7,19 @@ Accuracy is "resolved" on the 100 seed demos unless stated; per-instance results
 
 ## [Unreleased]: student improvements
 
-**Measured 2026-11-23** (details in `docs/BASELINE.md`):
+**Measured 2026-11-23, v3** (`20261123-081218-7a82b0`): with the **repro-only submit gate**, the
+student scored **88/100**, vs 83 for v2 and 85 for v1.
+- **The gate:** only running a `scratch_*.py` script after the last edit counts as a check now.
+  It fired in 60 episodes, and 55 of those were then solved.
+- **Scratch scripts:** used in 85 of 100 episodes, up from 37.
+- **Failure modes:** partial fixes fell from 8 to 3. Mean steps rose from 20.4 to 24.0.
+- **Hard instances:** 86%, up from 71%.
+- **A paired comparison:** at temperature 0, v3 replays v2's cached responses until the gate
+  first fires (1,077 live calls vs 2,047). Every difference is downstream of the gate, so the
+  +5 is attributable to it rather than to sampling noise.
+- **Backtest dashboard:** `runs/dashboard.html`, regenerated after every eval.
+
+**Measured 2026-11-23, v2** (details in `docs/BASELINE.md`):
 - **Result:** the no-training scaffold scored 83/100 vs 85/100 on one sample each, which is within
   noise.
 - **What worked:** reasoning replay (reasoning on 100% of turns, from 24%).
@@ -92,7 +104,7 @@ Motivation (from the baseline analysis below):
 - **Regressions:** 5 broke a hidden test even though every visible test passed.
 - **Reasoning:** 76% of student turns had no visible reasoning.
 
-No paid API calls were made for this entry; all of it is covered by offline tests (437 passing).
+No paid API calls were made for this entry; all of it is covered by offline tests (442 passing).
 
 ### No training needed
 - **Reasoning replay:** `keep_reasoning`. The student's `reasoning_content` was silently dropped

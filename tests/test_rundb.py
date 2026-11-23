@@ -66,8 +66,10 @@ def test_eval_records_run_episodes_and_resumes(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "make_policy", lambda m, t=None: ByTask())
     dbp, out = tmp_path / "runs.sqlite", tmp_path / "eval.jsonl"
     argv = ["eval", str(ROOT / "data/demos/seed.jsonl"), "--model", "claude-test", "--ids", ",".join(IDS),
-            "--root", str(ROOT), "--db", str(dbp), "--label", "gold replay", "--out", str(out)]
+            "--root", str(ROOT), "--db", str(dbp), "--label", "gold replay", "--out", str(out),
+            "--dashboard", str(tmp_path / "dash.html")]
     assert cli.main(argv) == 0
+    assert "gold replay" in (tmp_path / "dash.html").read_text()          # every backtest refreshes it
     db = R.RunDB(dbp)
     run = db.run("gold replay")
     assert run["status"] == "done" and run["accuracy"] == 1.0 and run["n_instances"] == 2
@@ -79,7 +81,7 @@ def test_eval_records_run_episodes_and_resumes(tmp_path, monkeypatch, capsys):
 
     # resume: nothing left to do -> no new episodes, summary still covers both
     monkeypatch.setattr(cli, "make_policy", lambda m, t=None: ByTask())
-    assert cli.main(argv[:-4] + ["--resume", run["run_id"], "--db", str(dbp)]) == 0
+    assert cli.main(argv[:-6] + ["--resume", run["run_id"], "--db", str(dbp), "--no-dashboard"]) == 0
     run2 = db.run(run["run_id"])
     assert run2["status"] == "done" and run2["summary"]["n"] == 2
     assert len(db.runs()) == 1

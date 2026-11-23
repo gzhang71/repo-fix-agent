@@ -17,11 +17,12 @@ demos, teacher distillation (off- and on-policy), preference learning, and RL.
 | | Model | Seed set (100) |
 |---|---|---|
 | Teacher | `claude-opus-5-5` | **98%** resolved, 5.5 steps, about $0.04 per instance |
-| Student | `nemotron-lightning-3p5-30b-a3b` (Fireworks, 30B MoE, ~3B active) | **85%** resolved, 16.6 steps |
+| Student | `nemotron-lightning-3p5-30b-a3b` (Fireworks, 30B MoE, ~3B active) | **88%** resolved, 24.0 steps (85% before the scaffold changes) |
 
 Student failures are mostly fixes that cover only the issue's example and miss the rest of the
-behaviour, not tool misuse (see BASELINE.md). The improvements in CHANGELOG "Unreleased" target
-that and are implemented and tested offline, **but not yet run against the paid APIs**.
+behaviour, not tool misuse (see BASELINE.md). The no-training scaffold is measured: the
+repro-only submit gate took the student from 85% to 88% and cut partial fixes from 8 to 3. The
+training steps in CHANGELOG "Unreleased" are implemented and tested offline but not yet run.
 The seed set is close to its ceiling. Add harder instances before relying on small gains.
 
 ## Setup
@@ -30,7 +31,7 @@ The seed set is close to its ceiling. Add harder instances before relying on sma
 pip install -e '.[teacher,openai]'      # optional extras: embed, voyage, secrets
 cp .env.example .env                    # fill in ANTHROPIC_API_KEY, FIREWORKS_API_KEY (gitignored)
 docker build -f docker/sandbox.Dockerfile -t repo-fix-sandbox:py3.12 docker   # the sandbox
-python -m pytest -q                     # 437 tests, offline (no API calls)
+python -m pytest -q                     # 442 tests, offline (no API calls)
 ```
 
 * Keys load from `.env` automatically; variables already set in your shell win.
@@ -92,6 +93,16 @@ repo-fix eval ... --resume <run>               # continue a crashed run; finishe
 repo-fix db import old.jsonl --label ...       # bring in results from before the database
 ```
 
+**Backtest dashboard.** Every `eval` rewrites `runs/dashboard.html`: one self-contained page, no
+external resources, light and dark themes. It shows:
+- **Headline tiles:** latest accuracy and change vs the previous comparable run, steps, API calls, cost.
+- **Charts:** accuracy across runs, accuracy by difficulty, and why the failures failed (gave up,
+  ran out of steps, partial fix, broke a passing test, ...).
+- **Lists:** the instances that flipped, and an instance × run matrix.
+- **A table of every run.**
+
+`repo-fix dashboard --run <id> --baseline <id> --open` builds one for any pair of runs.
+
 ## Improve the student
 
 **Without training** (on by default for the student in `configs/models.yaml`):
@@ -99,7 +110,8 @@ repo-fix db import old.jsonl --label ...       # bring in results from before th
   this, it was dropped and the student rebuilt its plan every turn.
 - **`spec_check`:** the system prompt asks it to list the behaviours and edge cases the issue
   implies and check them with `scratch_*.py` repro scripts, which never ship in the patch.
-- **`submit_gate`:** one nudge if it submits after an edit it never checked.
+- **`submit_gate`:** one nudge if it submits without running a `scratch_*.py` repro script since
+  its last edit. Running the existing tests doesn't count, because its failures pass them.
 - **Best-of-n with the execution reranker:** pools every candidate's repro scripts, runs each
   patch against all of them and the test suite, and picks the best. Selection costs no model calls.
 
@@ -195,6 +207,7 @@ src/repo_fix_agent/
   llm.py          single-turn TextLLM (Claude / GPT) for pipeline steps
   llm_cache.py    record/replay cache for paid calls
   rundb.py        run database (runs, results, episodes, instances) + `repo-fix db`
+  dashboard.py    backtest dashboard (HTML) from the run database
   envfile.py      .env loader
   sft.py          demo -> chat SFT example
   chat_spans.py   chat-template rendering with per-token loss weights (pipeline + train_lora)

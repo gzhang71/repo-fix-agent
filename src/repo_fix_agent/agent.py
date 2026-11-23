@@ -1,6 +1,8 @@
 """The agent loop: plug any Policy onto any repo."""
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from typing import Callable
 
@@ -29,10 +31,11 @@ them; it fails before your fix and passes after. Scratch files are never part of
 Passing existing tests is not enough on its own: they often miss the edge cases."""
 
 SUBMIT_NUDGE = (
-    "Not submitted yet. You haven't checked your change since the last edit. Before submitting: "
-    "list the behaviours the issue implies (including edge cases and other call paths that share the "
-    "code you changed), check each one with a quick scratch_*.py script or command, and run the test "
-    "suite. If everything holds, call `submit` again.")
+    "Not submitted yet. You haven't run a reproduction script since your last edit, and passing the "
+    "existing tests is not enough: they often miss the edge cases. Before submitting: list the "
+    "behaviours the issue implies (the case it shows, boundary and empty inputs, other call paths that "
+    "share the code you changed), write a scratch_*.py script that checks each of them, run it, and run "
+    "the test suite. If everything holds, call `submit` again.")
 
 
 @dataclass
@@ -55,20 +58,19 @@ def student_options(path: str = "configs/models.yaml") -> AgentOptions:
 
 
 _EDIT_TOOLS = {"str_replace", "create_file", "insert", "undo_edit"}
+_SCRATCH_RUN = re.compile(r"(python[\d.]*|pytest)\b[^|;&]*\bscratch_\w*\.py")
 
 
 def _is_check(tool: str, args: dict) -> bool:
-    """A step that exercises code: running tests, a script, or python."""
-    if tool == "run_tests":
-        return True
-    if tool == "bash":
-        cmd = str(args.get("command", ""))
-        return any(k in cmd for k in ("pytest", "python", "unittest", "tox", "make test"))
-    return False
+    """A step that runs a scratch_*.py reproduction script. Running the existing test suite does
+    not count: the student's failures pass the visible tests and miss hidden edge cases
+    (baseline v2: the gate never fired because every episode ran the suite after editing)."""
+    return tool == "bash" and bool(_SCRATCH_RUN.search(str(args.get("command", ""))))
 
 
 class SubmitGate:
-    """Bounces at most one `submit` per episode when the last edit hasn't been checked since."""
+    """Bounces at most one `submit` per episode when no scratch_*.py repro script has run since
+    the last source edit."""
 
     def __init__(self, enabled: bool):
         self.enabled, self.used = enabled, False

@@ -96,7 +96,18 @@ def test_submit_gate_bounces_once_after_unchecked_edit():
     g2 = A.SubmitGate(True)
     g2.observe("str_replace", {"path": "pkg/a.py"})
     g2.observe("bash", {"command": "python -m pytest -q"})
-    assert g2.intercept("submit") is None                     # checked since the edit
+    g2.observe("run_tests", {})
+    assert g2.intercept("submit") == A.SUBMIT_NUDGE           # the visible suite alone doesn't count
+    for cmd in ("python scratch_repro.py", "cd /repo && python3 scratch_edge.py", "pytest -q scratch_t.py"):
+        g = A.SubmitGate(True)
+        g.observe("str_replace", {"path": "pkg/a.py"})
+        g.observe("bash", {"command": cmd})
+        assert g.intercept("submit") is None, cmd             # a repro script ran after the edit
+    g4 = A.SubmitGate(True)
+    g4.observe("bash", {"command": "python scratch_repro.py"})
+    g4.observe("str_replace", {"path": "pkg/a.py"})           # edit after the repro: unchecked again
+    assert g4.intercept("submit") == A.SUBMIT_NUDGE
+    assert not A._is_check("bash", {"command": "cat scratch_repro.py"})
     g3 = A.SubmitGate(True)
     g3.observe("create_file", {"path": "scratch_repro.py"})   # scratch files aren't source edits
     assert g3.intercept("submit") is None
@@ -107,7 +118,7 @@ def test_run_agent_gate_and_scratch_excluded(pag):
     edit = next(s for s in pag.trajectory if s.action.tool == "str_replace")
     steps = [("repro", Action("create_file", {"path": "scratch_repro.py", "content": "print(1)\n"})),
              (edit.thought, edit.action), ("done", Action("submit", {})),
-             ("verify", Action("bash", {"command": "python -m pytest -q -p no:cacheprovider"})),
+             ("verify", Action("bash", {"command": "python scratch_repro.py"})),
              ("done", Action("submit", {}))]
     with RepoEnv(ROOT / pag.repo) as env:
         res = A.run_agent(ScriptedPolicy(steps), env, pag.problem_statement, pag.test_cmd,

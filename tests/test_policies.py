@@ -29,7 +29,7 @@ def test_student_solves_seed_demo_end_to_end():
     script = [_tool_msg(s.action.tool, s.action.args, s.thought, f"c{i}") for i, s in enumerate(demo.trajectory)]
     client = FakeClient(script)
     with RepoEnv(demo.repo, backend="local") as env:
-        res = run_agent(LocalModelPolicy(StudentServingConfig(), client=client), env,
+        res = run_agent(LocalModelPolicy(StudentServingConfig(submit_gate=False), client=client), env,
                         demo.problem_statement, demo.test_cmd)
     assert res.submitted and res.patch == demo.patch
     req = client.requests[-1]

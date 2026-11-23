@@ -16,6 +16,14 @@ SEED = ROOT / "data" / "demos" / "seed.jsonl"
 PAG, LEAP = "seed-001-pagination-offset", "seed-003-leap-year-century"
 
 
+
+@pytest.fixture(autouse=True)
+def _no_submit_gate(monkeypatch):
+    """These tests replay fixed gold scripts, which run the suite but no scratch_*.py repro, so the
+    submit gate would bounce their submit. The gate itself is tested in test_student_improve.py."""
+    from repo_fix_agent import agent
+    monkeypatch.setattr(agent.SubmitGate, "intercept", lambda self, tool: None)
+
 @pytest.fixture(autouse=True)
 def _local_sandbox(monkeypatch):
     # grader.grade builds RepoEnv(backend="auto"); keep it local and skip the `docker info` probe.

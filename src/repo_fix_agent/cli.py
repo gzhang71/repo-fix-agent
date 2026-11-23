@@ -158,10 +158,18 @@ def cmd_eval(a) -> int:
         out.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2))
     if db:
         db.finish_run(run_id, summary, usage)
-        db.close()
     print(format_summary(summary))
     if run_id:
         print(f"run {run_id} saved to the run database (repo-fix db show {run_id})")
+    if db and not a.no_dashboard:   # every backtest refreshes the dashboard
+        from .dashboard import write_dashboard
+        try:
+            path = write_dashboard(db, a.dashboard, run=run_id)
+            print(f"dashboard: {path.resolve()}")
+        except Exception as e:  # noqa: BLE001 - a dashboard problem must not fail the eval
+            print(f"dashboard not written: {type(e).__name__}: {e}", file=sys.stderr)
+    if db:
+        db.close()
     return 0
 
 
@@ -232,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--db", default=None, help="run database path (default $REPOFIX_DB or runs/repofix.sqlite)")
     e.add_argument("--no-db", action="store_true", help="don't record this run in the run database")
     e.add_argument("--resume", default=None, help="continue a run (id/prefix/label): skip samples already done")
+    e.add_argument("--dashboard", default="runs/dashboard.html", help="backtest dashboard written after the run")
+    e.add_argument("--no-dashboard", action="store_true", help="don't regenerate the dashboard")
     e.add_argument("--best-of", type=int, default=1,
                    help="sample N candidates per instance, pick one with the execution reranker, grade it "
                         "(also reports the oracle: any candidate correct)")
@@ -250,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     importlib.import_module(".web.server", __package__).register(sub)   # repo-fix serve
     importlib.import_module(".llm_cache", __package__).register(sub)    # repo-fix llm-cache
     importlib.import_module(".rundb", __package__).register(sub)        # repo-fix db
+    importlib.import_module(".dashboard", __package__).register(sub)    # repo-fix dashboard
 
     a = p.parse_args(argv)
     if a.sandbox:  # read by make_sandbox(), so every command and pipeline step honours it
