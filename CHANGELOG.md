@@ -7,13 +7,33 @@ Accuracy is "resolved" on the 100 seed demos unless stated; per-instance results
 
 ## [Unreleased]: student improvements (implemented, not run)
 
+### Difficulty-aware data weighting (implemented, free)
+- **Question it answers:** train on what the teacher solves and the student doesn't, or on both?
+  Answer: both, weighted by the student's own pass rate p, measured over several samples.
+- **`difficulty-weights`:** buckets each instance:
+  - gap: student never solves it. Teacher data, weight 1.
+  - learning: student solves it sometimes. RL and DPO, weight 1 − p.
+  - mastered: student always solves it. Replay only, weight 0.2.
+  - unsolved: neither model solves it. Skipped.
+- **Free check on the baseline** (1 sample each, so p is only 0 or 1): 14 gap, 85 mastered,
+  1 unsolved, which matches the teacher-only / both / neither split. Several samples per instance
+  are needed before the learning bucket fills.
+- **Wiring:**
+  - `sft-mix --instance-weights` scales the weights and caps the total per instance at 3.
+  - `sft-mix --student-rollouts` adds the student's shortest successful run per instance
+    (self-distillation, on its own distribution).
+  - `distill` and `onpolicy-distill` get `--instance-weights --max-pass-rate 0.75`, so teacher
+    calls go only to instances the student doesn't always solve.
+  - `--pass-rates-out` feeds the `rl-rollouts` curriculum.
+  - `student-train` gains the stages `weights`, `post-rollouts` and `rl-weights`.
+
 Motivation (from the baseline analysis below):
 - **Partial fixes:** 10 of the 14 instances the student missed and the teacher solved were partial
   fixes, where the issue's example is fixed and other hidden tests fail.
 - **Regressions:** 5 broke a hidden test even though every visible test passed.
 - **Reasoning:** 76% of student turns had no visible reasoning.
 
-No paid API calls were made for this entry; all of it is covered by offline tests (417 passing).
+No paid API calls were made for this entry; all of it is covered by offline tests (424 passing).
 
 ### No training needed
 - **Reasoning replay:** `keep_reasoning`. The student's `reasoning_content` was silently dropped

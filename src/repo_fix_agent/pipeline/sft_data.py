@@ -432,6 +432,7 @@ def build_sft_mix(engineer: list[Demo], teacher: list[Demo] | None = None, aux: 
         if seen[rid] > 1:
             rid = f"{rid}#{seen[rid] - 1}"
         rec = render_record(d, cfg, d.metadata.get("source") or default_src, rid)
+        rec["meta"] = {"parent_id": instance_key(d)}
         beyond = d.metadata.get("hidden_beyond_issue")
         if edge_case_weight != 1.0 and ((beyond or 0) > 0 or (beyond is None and len(d.FAIL_TO_PASS) > 1)):
             rec["weight"] *= edge_case_weight
@@ -559,6 +560,22 @@ def cmd_sft_mix(a) -> int:
         extra = read_jsonl(path)
         check_excluded(extra, exclude, path)   # records carry meta.parent_id
         records += extra
+    if a.student_rollouts:   # the student's own resolved episodes (self-distillation, on its own distribution)
+        from .difficulty import select_student_successes
+
+        own = select_student_successes([d for path in a.student_rollouts for d in load_demos(path)],
+                                       a.self_per_instance)
+        check_excluded(own, exclude, "student rollouts")
+        for d in own:
+            rec = render_record(d, cfg, "student-self", f"{instance_key(d)}#self{d.metadata.get('sample_idx', 0)}")
+            rec["meta"] = {"parent_id": instance_key(d)}
+            records.append(rec)
+    if a.instance_weights:
+        from .difficulty import apply_instance_weights, load_weights
+
+        records, wstats = apply_instance_weights(records, load_weights(a.instance_weights), a.unknown_weight,
+                                                 a.max_weight_per_instance or None)
+        print(json.dumps({"instance_weights": wstats}))
     write_jsonl(records, a.out)
     print(json.dumps(mix_stats(records)))
     return 0
@@ -576,6 +593,14 @@ def register(subparsers) -> None:
     p.add_argument("--edge-case-weight", type=float, default=1.0,
                    help="loss-weight multiplier for instances whose hidden tests go beyond the issue's example "
                         "(the student's main failure mode; try 2.0)")
+    p.add_argument("--student-rollouts", nargs="+", default=None,
+                   help="student episodes (eval --save-rollouts); resolved ones are added as self-distillation records")
+    p.add_argument("--self-per-instance", type=int, default=1, help="max student successes per instance (shortest first)")
+    p.add_argument("--instance-weights", default=None,
+                   help="difficulty-weights JSON: scale trajectory weights by max(floor, 1 - student pass rate)")
+    p.add_argument("--unknown-weight", type=float, default=1.0, help="weight for instances with no pass-rate measurement")
+    p.add_argument("--max-weight-per-instance", type=float, default=3.0,
+                   help="cap on the summed loss weight of one instance's records (0 = no cap)")
     p.add_argument("--aux-frac", type=float, default=0.2, help="max share of total tokens for aux tasks")
     p.add_argument("--backfill-model", default=None, help="teacher model for thought backfill")
     p.add_argument("--collapse-noops", action="store_true", help="drop no-op steps (re-executes demos)")

@@ -221,6 +221,14 @@ def onpolicy_distill(rollouts: list[Demo], teacher_factory: Callable[[], object]
 # ---- CLI ------------------------------------------------------------------------------------------
 def cmd_onpolicy(a) -> int:
     rollouts = select_rollouts(load_demos(a.rollouts), a.only_unresolved)
+    if a.instance_weights:   # spend teacher calls only where the student doesn't already succeed
+        from .difficulty import keep_for_teacher, load_weights
+
+        w, before = load_weights(a.instance_weights), len(rollouts)
+        rollouts = [r for r in rollouts
+                    if keep_for_teacher(str(r.metadata.get("parent_id") or r.instance_id), w, a.max_pass_rate)]
+        print(f"instance weights: kept {len(rollouts)}/{before} episodes with student pass rate <= {a.max_pass_rate}",
+              file=sys.stderr)
     try:
         check_not_excluded(rollouts, load_exclude_ids(a.exclude_ids), "on-policy distillation")
     except ExcludedInstanceError as e:
@@ -255,6 +263,9 @@ def register(subparsers) -> None:
     p.add_argument("--max-relabels", type=int, default=8, help="per episode cap (spread evenly)")
     p.add_argument("--only-unresolved", action="store_true", help="relabel only episodes the student failed")
     p.add_argument("--agree-weight", type=float, default=0.3, help="loss weight where student already agreed")
+    p.add_argument("--instance-weights", default=None, help="difficulty-weights JSON (focus on low pass rates)")
+    p.add_argument("--max-pass-rate", type=float, default=0.75,
+                   help="with --instance-weights: relabel only instances the student solves at most this often")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--exclude-ids", default=None, help="frozen test manifest")
     p.add_argument("--config", default="configs/models.yaml")

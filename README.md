@@ -30,7 +30,7 @@ The seed set is close to its ceiling. Add harder instances before relying on sma
 pip install -e '.[teacher,openai]'      # optional extras: embed, voyage, secrets
 cp .env.example .env                    # fill in ANTHROPIC_API_KEY, FIREWORKS_API_KEY (gitignored)
 docker build -f docker/sandbox.Dockerfile -t repo-fix-sandbox:py3.12 docker   # the sandbox
-python -m pytest -q                     # 417 tests, offline (no API calls)
+python -m pytest -q                     # 424 tests, offline (no API calls)
 ```
 
 * Keys load from `.env` automatically; variables already set in your shell win.
@@ -99,18 +99,37 @@ repo-fix student-train --round r1 --run distill --yes          # paid stages nee
 The stages, in order:
 1. **`augment`:** synthetic bug-injected instances, tagged when their hidden tests go beyond the
    issue's example.
-2. **`student-rollouts`:** student episodes, kept for the later stages.
-3. **`distill`:** rejection-sampled teacher trajectories, recorded under the student's prompt.
-4. **`onpolicy`:** the teacher relabels the states the student actually reached (DAgger), and
-   also produces step-level DPO pairs.
-5. **`aux`:** auxiliary training tasks.
-6. **`prefs`:** preference pairs.
-7. **`sft-mix`:** the mixed SFT set, with edge-case instances weighted 2x.
-8. **`export`:** chat fine-tuning JSONL.
-9. **`train-sft`, then `train-dpo`:** `scripts/train_lora.py`, on a GPU box.
-10. **`deploy`:** Fireworks on-demand deployment.
-11. **`eval`**
-12. **`rl-rollouts`, then `train-rl`:** GRPO-style policy gradient with a KL penalty to the reference.
+2. **`student-rollouts`:** 4 student episodes per instance, kept for the later stages.
+3. **`weights`** (free): each instance's student pass rate p sets its bucket and training weight
+   (see below).
+4. **`distill`:** rejection-sampled teacher trajectories, recorded under the student's prompt. Only
+   for instances with p ≤ 0.75.
+5. **`onpolicy`:** the teacher relabels the states the student actually reached (DAgger), and
+   also produces step-level DPO pairs. Also only for p ≤ 0.75.
+6. **`aux`:** auxiliary training tasks.
+7. **`prefs`:** preference pairs.
+8. **`sft-mix`:** engineer, teacher, on-policy and the student's own successful runs, weighted by
+   difficulty, with edge-case instances weighted 2x.
+9. **`export`:** chat fine-tuning JSONL.
+10. **`train-sft`, then `train-dpo`:** `scripts/train_lora.py`, on a GPU box.
+11. **`deploy`:** Fireworks on-demand deployment.
+12. **`eval`**
+13. **`post-rollouts`, then `rl-weights`:** pass rates of the fine-tuned student, for the RL curriculum.
+14. **`rl-rollouts`, then `train-rl`:** GRPO-style policy gradient with a KL penalty to the reference,
+    on instances the student solves only sometimes.
+
+**Difficulty weighting** (`repo-fix difficulty-weights`, no model calls). Training effort goes
+where the student's pass rate p is low, not by which model solved an instance:
+
+| Bucket | Student pass rate | Used for | SFT weight |
+|---|---|---|---|
+| gap | never (teacher solves or unknown) | teacher distillation, on-policy relabel | 1 − p (= 1) |
+| learning | sometimes | RL (groups with both wins and losses), DPO pairs | 1 − p |
+| mastered | always | a little replay so it isn't forgotten | 0.2 |
+| unsolved | never, teacher fails too | skipped (no correct run to learn from) | 0 |
+
+`sft-mix --instance-weights` applies the weights and caps the summed weight per instance at 3, so
+an instance with many recorded runs can't dominate.
 
 **Training runs outside this repo.** Fireworks' managed SFT/DPO stopped taking new jobs on
 2026-11-09. The exported JSONL fits their Training API, or use the bundled
@@ -125,7 +144,7 @@ One command per proposal in `docs/DEMO_DATA_PROPOSALS.md`:
 | Group | Commands |
 |---|---|
 | Clean and split | `audit` (validation, flakiness, dedup incl. semantic, leakage, secrets/PII), `split`, `eval-set` |
-| Training data | `distill`, `mix`, `sft-mix`, `aux-tasks`, `prefs`, `augment`, `onpolicy-distill` |
+| Training data | `distill`, `mix`, `sft-mix`, `aux-tasks`, `prefs`, `augment`, `onpolicy-distill`, `difficulty-weights` |
 | Verification and RL | `verifier-train`, `best-of-n`, `rl-rollouts` |
 | Retrieval | `retrieval-index`, `retrieve` (hybrid TF-IDF + embeddings) |
 | Training | `export-chat-ft`, `fireworks-deploy`, `student-train` |
@@ -148,7 +167,7 @@ src/repo_fix_agent/
   envfile.py      .env loader
   sft.py          demo -> chat SFT example
   pipeline/       audit split distill sft_data aux_tasks preferences verifier rl retrieval augment
-                  repro embed parallel rerank onpolicy training
+                  repro embed parallel rerank onpolicy training difficulty
   web/            `repo-fix serve`: jobs, GitHub forge, HTTP server, static UI
 scripts/
   build_seed_dataset.py, seed_specs/     the 100 seed instances

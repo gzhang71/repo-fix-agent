@@ -619,6 +619,13 @@ def _parse_ratio(s: str) -> tuple[int, int]:
 def cmd_distill(a) -> int:
     demos = load_demos(a.demos)
     exclude = load_exclude_ids(a.exclude_ids) if a.exclude_ids else set()
+    if a.instance_weights:   # skip instances the student already solves: its own runs cover them
+        from .difficulty import keep_for_teacher, load_weights
+
+        w, before = load_weights(a.instance_weights), len(demos)
+        demos = [d for d in demos if keep_for_teacher(d.instance_id, w, a.max_pass_rate)]
+        print(f"instance weights: distilling {len(demos)}/{before} instances with student pass rate "
+              f"<= {a.max_pass_rate}")
     factory = lambda: policies.make_policy(a.model)  # noqa: E731
     try:
         kept, failed, stats = distill(demos, factory, a.root, a.k, a.max_steps, a.model, exclude_ids=exclude,
@@ -660,6 +667,9 @@ def register(subparsers) -> None:
     d.add_argument("--root", default=".")
     d.add_argument("--backend", default="auto", choices=["auto", "docker", "local"])
     d.add_argument("--workers", type=int, default=1, help="concurrent episodes (threads)")
+    d.add_argument("--instance-weights", default=None, help="difficulty-weights JSON (focus on low pass rates)")
+    d.add_argument("--max-pass-rate", type=float, default=0.75,
+                   help="with --instance-weights: distill only instances the student solves at most this often")
     d.set_defaults(fn=cmd_distill)
 
     m = subparsers.add_parser("mix", help="mix teacher and engineer demos at a trajectory-count ratio")
