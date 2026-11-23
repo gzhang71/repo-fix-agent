@@ -205,13 +205,17 @@ def plan(round_dir: Path, splits: Path, prev_rollouts: str | None = None, sample
         Stage("rl-weights", "pass rates of the fine-tuned student -> RL curriculum (mixed-outcome instances)",
               ["difficulty-weights", str(r / "post_eval.jsonl"), "--out", str(r / "post_weights.json"),
                "--pass-rates-out", str(r / "pass_rates.json")], needs=["post-rollouts"]),
-        Stage("rl-rollouts", "GRPO batches on instances the student solves only sometimes",
+        Stage("rl-rollouts", "GRPO batches on instances the student solves only sometimes; shaped reward "
+                             "(partial credit, broken-test penalty, verified-repro bonus); groups that all tie dropped",
               ["rl-rollouts", train, "--model", "student", "--group-size", "8", "--workers", "8",
-               "--pass-rates", str(r / "pass_rates.json"), "--exclude-ids", m, "--out", str(r / "rl_batch.jsonl")],
+               "--pass-rates", str(r / "pass_rates.json"), "--reward", "shaped", "--dynamic-sampling",
+               "--exclude-ids", m, "--out", str(r / "rl_batch.jsonl")],
               paid="Fireworks inference (8 episodes per instance)", needs=["eval", "rl-weights"]),
-        Stage("train-rl", "policy-gradient (GRPO advantages) + KL step on the batch, then redeploy", None,
+        Stage("train-rl", "clipped policy gradient (GRPO advantages, clip-higher, token-level loss) + KL, "
+                          "2 passes over the batch, then redeploy", None,
               paid="GPU hours", external=f"python scripts/train_lora.py --base {base_model_hf} --adapter "
                                          f"{r / 'lora_dpo'} --data {r / 'rl_batch.jsonl'} --objective pg "
+                                         f"--loss-agg token --clip-low 0.2 --clip-high 0.28 --epochs 2 "
                                          f"--out {r / 'lora_rl'}", needs=["rl-rollouts"]),
     ]
     extra: list[Stage] = []

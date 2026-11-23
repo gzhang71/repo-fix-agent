@@ -252,10 +252,11 @@ class StudentServingConfig:
     keep_reasoning: bool = True              # record + resend the model's reasoning_content
     spec_check: bool = True                  # behaviour/edge-case checklist in the system prompt
     submit_gate: bool = True                 # bounce one unverified submit per episode
+    step_notice: int = 8                     # "[N steps left]" on observations once N <= this (0 = off)
 
     def agent_options(self):
         from .agent import AgentOptions
-        return AgentOptions(spec_check=self.spec_check, submit_gate=self.submit_gate)
+        return AgentOptions(spec_check=self.spec_check, submit_gate=self.submit_gate, step_notice=self.step_notice)
 
     @classmethod
     def load(cls, path: str | Path = "configs/models.yaml") -> "StudentServingConfig":

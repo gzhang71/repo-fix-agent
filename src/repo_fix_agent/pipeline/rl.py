@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from ..agent import SubmitGate, build_task, student_options
+from ..agent import SubmitGate, build_task, steps_left_notice, student_options
 from ..schema import Action, Demo, Step, load_demos
 from .parallel import pmap
 from .verifier import (ExcludedInstanceError, check_not_excluded, load_exclude_ids, parse_patch,
@@ -31,12 +31,22 @@ class RewardConfig:
     step_penalty: float = 0.002
     format_penalty: float = 0.05
     test_infra_penalty: float = 1.0
+    # shaped credit on the hidden tests (rl_rewards.py): "binary" = resolved or nothing
+    reward: str = "shaped"
+    partial_weight: float = 0.5        # x fraction of FAIL_TO_PASS passed, when not resolved
+    p2p_penalty: float = 0.5           # x fraction of PASS_TO_PASS broken
+    repro_bonus: float = 0.1           # a scratch_*.py that fails on the base and passes on the patch
     test_infra_patterns: tuple[str, ...] = ("conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml",
                                             ".github/", "noxfile.py")
 
 
 def compute_reward(resolved: bool, n_steps: int, n_tool_errors: int, patch: str,
-                   cfg: RewardConfig | None = None) -> tuple[float, dict[str, Any]]:
+                   cfg: RewardConfig | None = None, grade: dict | None = None, repro: dict | None = None,
+                   truncated: bool = False) -> tuple[float, dict[str, Any]]:
+    """`grade` (fail_to_pass / pass_to_pass dicts) enables shaped credit; `repro`
+    (rl_rewards.ReproResult.summary()) enables the repro bonus. Without them: binary reward."""
+    from .rl_rewards import shaped_credit
+
     cfg = cfg or RewardConfig()
     infra = touches_test_infra(parse_patch(patch)["files"], cfg.test_infra_patterns)
     bd = {
@@ -48,8 +58,15 @@ def compute_reward(resolved: bool, n_steps: int, n_tool_errors: int, patch: str,
         "n_tool_errors": n_tool_errors,
         "test_infra_files": infra,
         "resolved_with_test_infra_edit": bool(resolved and infra),
+        "truncated": truncated,        # ran out of steps: kept apart from a wrong fix in the breakdown
     }
-    bd["total"] = bd["resolved"] + bd["step_penalty"] + bd["format_penalty"] + bd["test_infra_penalty"]
+    shaped = shaped_credit(resolved, grade, cfg.partial_weight, cfg.p2p_penalty) if cfg.reward == "shaped" \
+        else {"partial_credit": 0.0, "p2p_penalty": 0.0}
+    bd.update(shaped)
+    bd["repro_bonus"] = cfg.repro_bonus if (repro or {}).get("valid_repro") else 0.0
+    bd["repro"] = repro
+    bd["total"] = (bd["resolved"] + bd["partial_credit"] + bd["p2p_penalty"] + bd["repro_bonus"]
+                   + bd["step_penalty"] + bd["format_penalty"] + bd["test_infra_penalty"])
     return bd["total"], bd
 
 
@@ -111,6 +128,8 @@ class RepoFixEnv:
         nudge = self.gate.intercept(action.tool)   # same submit gate as inference (run_agent)
         obs = nudge if nudge is not None else self.env.execute(action)
         self.gate.observe(action.tool, action.args or {})
+        if not self.env.done:                       # same steps-left notice as inference
+            obs += steps_left_notice(self.max_steps - len(self.trajectory) - 1, self.options.step_notice)
         self.trajectory.append(Step(thought, action, obs))
         submitted = self.env.done
         if not submitted and len(self.trajectory) < self.max_steps:
@@ -118,13 +137,25 @@ class RepoFixEnv:
         return obs, *self._finish(submitted)
 
     def _finish(self, submitted: bool) -> tuple[float, bool, dict[str, Any]]:
+        from . import rl_rewards as RR
+
         patch = self.env.diff()
+        scripts, patched_rc = {}, {}
+        if self.cfg.repro_bonus > 0:   # run the agent's repro scripts on its patched tree before teardown
+            scripts = RR.collect_scratch(self.env)
+            patched_rc = RR.run_patched(self.env, scripts) if scripts else {}
         self.close()
         self.done = True
         g = self.grade_fn(self.demo, patch, self.root)
+        repro = None
+        if scripts:
+            base = RR.run_base(_repo_path(self.demo, self.root), self.demo.base_commit, scripts, self.backend)
+            repro = RR.repro_check(patched_rc, base).summary()
         policy_steps = self.trajectory[self.n_prefix:]
         n_err = sum(s.observation.startswith("Error:") for s in policy_steps)
-        reward, bd = compute_reward(g.resolved, len(policy_steps), n_err, patch, self.cfg)
+        grade = {"fail_to_pass": g.fail_to_pass, "pass_to_pass": g.pass_to_pass, "error": g.error}
+        reward, bd = compute_reward(g.resolved, len(policy_steps), n_err, patch, self.cfg, grade, repro,
+                                    truncated=not submitted)
         if bd["test_infra_files"]:
             log.warning("%s: patch touches test infra %s (resolved=%s)", self.demo.instance_id,
                         bd["test_infra_files"], g.resolved)
@@ -219,6 +250,41 @@ def rollout_group(policy_factory: Callable[[], Any], demo: Demo, group_size: int
     return eps
 
 
+def informative(group: Sequence[Episode], min_std: float = 1e-6) -> bool:
+    """A group whose rewards all tie gives every episode advantage 0: no gradient. Dynamic sampling
+    (as in DAPO) drops it and draws another instance instead of padding the batch with zeros."""
+    rs = [e.reward for e in group]
+    if len(rs) < 2:
+        return False
+    m = sum(rs) / len(rs)
+    return math.sqrt(sum((r - m) ** 2 for r in rs) / len(rs)) > min_std
+
+
+def dynamic_sample(plan: Sequence[tuple[Demo, int]], run_group: Callable[[Demo, int], list[Episode]],
+                   target_groups: int | None = None, batch: int = 1, min_std: float = 1e-6,
+                   on_group: Callable | None = None) -> tuple[list[tuple[Demo, int, list[Episode]]], dict]:
+    """Roll out plan entries `batch` at a time, keeping only informative groups, until
+    `target_groups` are kept or the plan runs out."""
+    kept, dropped, tried = [], 0, 0
+    i = 0
+    while i < len(plan) and (target_groups is None or len(kept) < target_groups):
+        chunk = plan[i:i + max(1, batch)]
+        i += len(chunk)
+        for (demo, t), eps in zip(chunk, pmap(lambda dt: run_group(*dt), chunk, max(1, batch))):
+            tried += 1
+            ok = informative(eps, min_std)
+            if on_group:
+                on_group(demo, t, eps, ok)
+            if ok:
+                kept.append((demo, t, eps))
+            else:
+                dropped += 1
+    if target_groups is not None:
+        kept = kept[:target_groups]
+    return kept, {"tried": tried, "kept": len(kept), "dropped_uniform": dropped,
+                  "target_groups": target_groups, "plan_left": len(plan) - i}
+
+
 # ---- curriculum -----------------------------------------------------------------------------
 def estimate_pass_at_k(policy_factory: Callable[[], Any], demos: Sequence[Demo], k: int = 8,
                        root: str | Path = ".", max_steps: int = 40, backend: str = "auto",
@@ -279,7 +345,9 @@ def episode_to_record(ep: Episode, demo: Demo) -> dict[str, Any]:
             mask.append(False)
     return {"instance_id": ep.instance_id, "group_id": ep.group_id, "messages": msgs, "loss_mask": mask,
             "reward": ep.reward, "advantage_grpo": ep.advantage_grpo, "advantage_rloo": ep.advantage_rloo,
-            "prefix_steps": ep.prefix_steps, "resolved": ep.resolved}
+            "prefix_steps": ep.prefix_steps, "resolved": ep.resolved,
+            "reward_breakdown": {k: v for k, v in ep.breakdown.items() if k != "repro"},
+            "valid_repro": bool((ep.breakdown.get("repro") or {}).get("valid_repro"))}
 
 
 def write_batch(records: Sequence[dict], path: str | Path) -> None:
@@ -315,20 +383,36 @@ def cmd_rl_rollouts(a) -> int:
     records = []
     from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max(1, a.workers), thread_name_prefix="episode") as episodes:
-        groups = pmap(lambda dt: rollout_group(lambda: policies.make_policy(a.model), dt[0], a.group_size, dt[1],
-                                               a.root, a.max_steps, backend=a.backend, exclude_ids=exclude,
-                                               pool=episodes if a.workers > 1 else None),
-                      plan, a.workers)
-    for (demo, t), eps in zip(plan, groups):
-        records += [episode_to_record(e, demo) for e in eps]
+    rcfg = RewardConfig(reward=a.reward, partial_weight=a.partial_weight, p2p_penalty=a.p2p_penalty,
+                        repro_bonus=a.repro_bonus)
+
+    def report(demo, t, eps, ok=True):
         print(json.dumps({"instance_id": demo.instance_id, "prefix_steps": t,
                           "resolved": sum(e.resolved for e in eps), "group_size": len(eps),
                           "mean_reward": sum(e.reward for e in eps) / max(1, len(eps)),
-                          "test_infra_hacks": sum(e.breakdown["resolved_with_test_infra_edit"] for e in eps)}),
-              file=sys.stderr)
+                          "valid_repros": sum(bool((e.breakdown.get("repro") or {}).get("valid_repro")) for e in eps),
+                          "truncated": sum(bool(e.breakdown.get("truncated")) for e in eps),
+                          "test_infra_hacks": sum(e.breakdown["resolved_with_test_infra_edit"] for e in eps),
+                          "kept": ok}), file=sys.stderr)
+
+    with ThreadPoolExecutor(max(1, a.workers), thread_name_prefix="episode") as episodes:
+        def run_group(demo, t):
+            return rollout_group(lambda: policies.make_policy(a.model), demo, a.group_size, t, a.root, a.max_steps,
+                                 reward_config=rcfg, backend=a.backend, exclude_ids=exclude,
+                                 pool=episodes if a.workers > 1 else None)
+        if a.dynamic_sampling:
+            kept, stats = dynamic_sample(plan, run_group, a.target_groups, a.workers, on_group=report)
+            print(json.dumps({"dynamic_sampling": stats}), file=sys.stderr)
+            done = [(d, t, eps) for d, t, eps in kept]
+        else:
+            groups = pmap(lambda dt: run_group(*dt), plan, a.workers)
+            done = [(d, t, eps) for (d, t), eps in zip(plan, groups)]
+            for d, t, eps in done:
+                report(d, t, eps, informative(eps))
+    for demo, t, eps in done:
+        records += [episode_to_record(e, demo) for e in eps]
     write_batch(records, a.out)
-    print(f"wrote {len(records)} episodes to {a.out}")
+    print(f"wrote {len(records)} episodes ({len(done)} groups) to {a.out}")
     return 0
 
 
@@ -346,4 +430,13 @@ def register(subparsers) -> None:
     r.add_argument("--max-steps", type=int, default=40)
     r.add_argument("--backend", default="auto")
     r.add_argument("--workers", type=int, default=1, help="concurrent episodes (threads)")
+    r.add_argument("--reward", choices=["shaped", "binary"], default="shaped",
+                   help="shaped: partial credit for FAIL_TO_PASS passed, penalty for PASS_TO_PASS broken (hidden tests)")
+    r.add_argument("--partial-weight", type=float, default=0.5)
+    r.add_argument("--p2p-penalty", type=float, default=0.5)
+    r.add_argument("--repro-bonus", type=float, default=0.1,
+                   help="bonus when a scratch_*.py fails on the base commit and passes on the patch (0 = off)")
+    r.add_argument("--dynamic-sampling", action="store_true",
+                   help="drop groups whose rewards all tie (no gradient) and keep drawing instances")
+    r.add_argument("--target-groups", type=int, default=None, help="with --dynamic-sampling: stop after N kept groups")
     r.set_defaults(fn=cmd_rl_rollouts)

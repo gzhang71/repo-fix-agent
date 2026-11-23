@@ -27,6 +27,40 @@ student scored **88/100**, vs 83 for v2 and 85 for v1.
   fired, because running the visible tests counts as a check.
 - The training items below are still implemented but not run.
 
+### RL improvements (implemented, not run)
+- **Shaped reward on the hidden tests** (`rl_rewards.py`, the default):
+  - Resolved scores 1.0.
+  - Otherwise, 0.5 × the fraction of FAIL_TO_PASS tests passed.
+  - Either way, minus 0.5 × the fraction of PASS_TO_PASS tests broken, the largest failure mode
+    in v3.
+  - A resolved episode always outranks an unresolved one.
+- **Verified-repro bonus (+0.1):** the student's `scratch_*.py` scripts run against the untouched
+  base commit and against its patched tree.
+  - The bonus needs one script that fails on the base and passes on the patch.
+  - A failure from not running at all (import, syntax or name errors) doesn't count.
+  - Scripts never ship, so the bonus can't change what is graded.
+- **Dynamic sampling:** `rl-rollouts --dynamic-sampling [--target-groups N]` drops groups whose
+  rewards all tie (zero advantage, no gradient) and keeps drawing instances.
+- **The update** (`train_lora.py --objective pg`):
+  - Clipped policy-gradient surrogate against the starting policy's log-probs, with a looser
+    upward limit (0.2 / 0.28) so rare good tokens can grow.
+  - Token-level loss averaging over each accumulation window, so long episodes aren't
+    down-weighted.
+  - `student-train` runs it for 2 passes.
+  - Also fixed: a skipped record could end a window without an optimizer step.
+- **Running out of steps:**
+  - "[N steps left]" is appended to observations for the last 8 steps (`step_notice` in
+    `models.yaml`), identically in `run_agent`, the RL environment and SFT rendering. Already
+    recorded notices aren't doubled.
+  - The reward breakdown marks `truncated` episodes apart from wrong fixes.
+- **Verified offline:**
+  - An end-to-end episode where the student's repro script failed on the base and passed on its
+    fix earned the bonus.
+  - An import-error script didn't.
+  - The pg update trained on a tiny model with token-level and per-episode averaging.
+- **Not yet measured:** the steps-left notice changes what the student sees, so the next baseline
+  run will show its effect.
+
 ### Run database
 - **`runs/repofix.sqlite`:** `eval` records every run. Tables:
   - `runs`: model, scaffold settings with the system-prompt hash, dataset hash, git commit and
@@ -104,7 +138,7 @@ Motivation (from the baseline analysis below):
 - **Regressions:** 5 broke a hidden test even though every visible test passed.
 - **Reasoning:** 76% of student turns had no visible reasoning.
 
-No paid API calls were made for this entry; all of it is covered by offline tests (442 passing).
+No paid API calls were made for this entry; all of it is covered by offline tests (451 passing).
 
 ### No training needed
 - **Reasoning replay:** `keep_reasoning`. The student's `reasoning_content` was silently dropped

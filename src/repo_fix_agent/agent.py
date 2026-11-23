@@ -44,9 +44,22 @@ class AgentOptions:
     and are reused for SFT rendering, RL and distillation so training matches inference."""
     spec_check: bool = False     # extend the system prompt with the behaviour/edge-case checklist
     submit_gate: bool = False    # bounce the first `submit` that follows an unverified edit
+    step_notice: int = 0         # append "[N steps left]" to observations once N <= this (0 = off)
 
     def system_prompt(self) -> str:
         return SYSTEM_PROMPT + (SPEC_CHECK if self.spec_check else "")
+
+
+def steps_left_notice(left: int, threshold: int) -> str:
+    """Suffix for an observation when the step budget is nearly spent (`left` = actions remaining).
+    Baseline v3 lost 3 instances to the step limit; the student had no way to see it coming."""
+    if not threshold or left > threshold or left < 0:
+        return ""
+    if left == 0:
+        return ""
+    if left == 1:
+        return "\n\n[1 step left: this is your last action. Call `submit` now if your fix is in place.]"
+    return f"\n\n[{left} steps left. Leave time to verify with your scratch script and submit.]"
 
 
 def student_options(path: str = "configs/models.yaml") -> AgentOptions:
@@ -122,6 +135,8 @@ def run_agent(policy: Policy, env: RepoEnv, problem_statement: str,
         nudge = gate.intercept(action.tool)
         obs = nudge if nudge is not None else env.execute(action)
         gate.observe(action.tool, action.args or {})
+        if not env.done:
+            obs += steps_left_notice(max_steps - i - 1, opts.step_notice)
         trajectory.append(Step(thought, action, obs))
         if on_step is not None:
             on_step(i, trajectory[-1])

@@ -1,6 +1,6 @@
 # Baseline: student vs teacher on the 100 seed demos
 
-Run on 2026-11-22 with `repo-fix eval data/demos/seed.jsonl --model <m> --workers N --out runs/baseline/<m>.jsonl`.
+Run on 2026-11-22 with `repo-fix eval data/demos/seed.jsonl --model <m> --workers N`.
 Same agent loop, tools, 40-step budget and Docker sandbox for both; each patch graded by the hidden
 FAIL_TO_PASS / PASS_TO_PASS tests. No errors (API or sandbox) in either run.
 
@@ -40,7 +40,7 @@ Overlap: 84 solved by both; 14 by the teacher only; 1 by the student only (`seed
 3. **Single sample per instance.** Opus runs at temperature 1, so expect ±2–3 points on a rerun.
    Rerunning the same command replays the cache; set `REPOFIX_LLM_CACHE=off` to resample.
 
-Per-instance results: `runs/baseline/{student,teacher}.jsonl` (gitignored), with summaries next to them.
+Per-instance results are in the run database (`runs/repofix.sqlite`, gitignored): `repo-fix db show "student baseline v1 (2026-11-22)"`.
 
 ## 2026-11-23: student baseline v2 (new no-training scaffold, measured)
 

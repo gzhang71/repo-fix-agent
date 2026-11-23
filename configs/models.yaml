@@ -42,7 +42,8 @@ student:
     # Inference scaffold (also used for SFT rendering, RL and distillation, so train == inference):
     keep_reasoning: true                    # keep + resend the model's reasoning_content each turn
     spec_check: true                        # system prompt: list implied behaviours/edge cases, repro them
-    submit_gate: true                       # one nudge if `submit` follows an unchecked edit
+    submit_gate: true                       # one nudge if `submit` comes without a scratch repro run since the last edit
+    step_notice: 8                          # "[N steps left]" on observations for the last 8 steps (0 = off)
     # launch: vllm serve <weights> --served-model-name student --max-model-len 65536
     #         --enable-auto-tool-choice --tool-call-parser <parser matching the model family>
   finetune:

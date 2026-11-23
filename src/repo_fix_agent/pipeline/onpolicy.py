@@ -151,7 +151,8 @@ def to_sft_records(rollout: Demo, relabels: list[Relabel], cfg: StudentServingCo
         if r.agree and not include_agreeing:
             continue
         prefix_demo = replace(rollout, trajectory=rollout.trajectory[:r.step])
-        msgs = sft.render_messages(prefix_demo, sys_prompt, reasoning_field=cfg.keep_reasoning)
+        msgs = sft.render_messages(prefix_demo, sys_prompt, reasoning_field=cfg.keep_reasoning,
+                                   step_notice=cfg.step_notice)
         call = [{"id": f"call_{r.step}", "type": "function", "function": {
             "name": r.teacher_action.tool, "arguments": json.dumps(r.teacher_action.args)}}]
         if signal is not None and r.teacher_text is not None:

@@ -143,7 +143,8 @@ def render_record(demo: Demo, cfg: StudentServingConfig | None = None, source: s
     cfg = cfg or StudentServingConfig()
     tools = sft.tools_as_functions()
     messages = apply_context_budget(
-        sft.render_messages(demo, cfg.agent_options().system_prompt(), reasoning_field=cfg.keep_reasoning), tools, cfg)
+        sft.render_messages(demo, cfg.agent_options().system_prompt(), reasoning_field=cfg.keep_reasoning,
+                            step_notice=cfg.step_notice), tools, cfg)
     return {
         "id": record_id or demo.instance_id,
         "messages": messages,
@@ -513,7 +514,8 @@ def check_prompt_consistency(demo: Demo, cfg: StudentServingConfig | None = None
     client = _CaptureClient(demo.trajectory, reasoning=cfg.keep_reasoning)
     run_agent(LocalModelPolicy(cfg, client=client), _ReplayEnv(demo.trajectory, n),
               demo.problem_statement, demo.test_cmd, max_steps=n)
-    rendered = sft.render_messages(demo, cfg.agent_options().system_prompt(), reasoning_field=cfg.keep_reasoning)
+    rendered = sft.render_messages(demo, cfg.agent_options().system_prompt(), reasoning_field=cfg.keep_reasoning,
+                                   step_notice=cfg.step_notice, max_steps=n)
     tools = sft.tools_as_functions()
     problems = []
     if not client.requests:

@@ -168,6 +168,12 @@ def main() -> int:
     ap.add_argument("--lora-alpha", type=int, default=128)
     ap.add_argument("--kl-beta", type=float, default=0.05, help="pg: KL(policy||reference) coefficient")
     ap.add_argument("--adv-clip", type=float, default=5.0, help="pg: clip |advantage|")
+    ap.add_argument("--loss-agg", choices=["token", "sequence"], default="token",
+                    help="pg: token = sum over every trained token in the accumulation window / their count "
+                         "(long episodes aren't down-weighted); sequence = mean per episode, then over episodes")
+    ap.add_argument("--clip-low", type=float, default=0.2, help="pg: ratio clip below (1 - clip_low); 0 = no clipping")
+    ap.add_argument("--clip-high", type=float, default=0.28,
+                    help="pg: ratio clip above (1 + clip_high); higher than clip-low so rare good tokens can grow")
     ap.add_argument("--dpo-beta", type=float, default=0.1)
     ap.add_argument("--topk-coef", type=float, default=0.5, help="tokenkl: weight of the top-k forward-KL term")
     ap.add_argument("--teacher-base", default=None, help="gkd: HF id/path of the teacher (same tokenizer)")
@@ -219,6 +225,20 @@ def main() -> int:
     steps = math.ceil(len(records) * a.epochs)
     order = [i % len(records) for i in range(steps)]
     random.shuffle(order)
+    pg_cache, old_lp, window_tokens = {}, {}, []
+    if a.objective == "pg":
+        # Encode once; record the starting policy's log-probs ("old" policy for the clipped ratio:
+        # the adapter that generated the rollouts). With --epochs > 1 the ratio keeps later passes
+        # from moving any token's probability too far from where sampling left it.
+        for i, r in enumerate(records):
+            w = [max(-a.adv_clip, min(a.adv_clip, x)) for x in message_weights(r["messages"], "pg", r)]
+            ids, tw = enc.encode(r["messages"], w, r.get("tools") or tools_default)
+            pg_cache[i] = (ids, tw)
+            if a.clip_low > 0 and any(tw):
+                with torch.no_grad():
+                    old_lp[i] = token_logps(model, ids, torch).detach().to("cpu", torch.float32)
+        for k in range(0, len(order), a.grad_accum):   # trained tokens per accumulation window
+            window_tokens.append(max(1, sum(sum(1 for x in pg_cache[j][1][1:] if x) for j in order[k:k + a.grad_accum])))
     model.train()
     running, skipped = 0.0, 0
 
@@ -239,16 +259,41 @@ def main() -> int:
             loss = tokenkl_loss(model, r, a.max_len, a.adv_clip, a.topk_coef, torch)
             if loss is None:
                 skipped += 1
+                _maybe_step(step)
                 continue
+        elif a.objective == "pg":
+            ids, tw = pg_cache[idx]
+            weights = torch.tensor(tw[1:], device=model.device)
+            mask = weights != 0
+            if not mask.any():
+                skipped += 1
+                _maybe_step(step)
+                continue
+            logp = token_logps(model, ids, torch)
+            if idx in old_lp:   # PPO-style clipped surrogate, asymmetric ("clip-higher")
+                ratio = torch.exp(logp - old_lp[idx].to(logp.device))
+                surr = torch.min(ratio * weights, ratio.clamp(1 - a.clip_low, 1 + a.clip_high) * weights)
+            else:               # plain REINFORCE with group-relative advantages
+                surr = weights * logp
+            with torch.no_grad(), model.disable_adapter():
+                ref = token_logps(model, ids, torch)
+            kl = logp - ref
+            if a.loss_agg == "token":
+                denom = window_tokens[(step - 1) // a.grad_accum]
+                loss = (-surr[mask].sum() + a.kl_beta * kl[mask].sum()) / denom
+                loss.backward()
+                running += float(loss) * a.grad_accum
+                _maybe_step(step)
+                continue
+            loss = -surr[mask].mean() + a.kl_beta * kl[mask].mean()
         else:
             msgs = r["messages"]
             w = message_weights(msgs, a.objective, r)
-            if a.objective == "pg":
-                w = [max(-a.adv_clip, min(a.adv_clip, x)) for x in w]
             ids, tw = enc.encode(msgs, w, tools)
             weights = torch.tensor(tw[1:], device=model.device)
             if not weights.abs().sum():
                 skipped += 1
+                _maybe_step(step)
                 continue
             if a.objective == "gkd":
                 loss = gkd_loss(model, teacher, ids, weights, a.gkd_beta, torch)
@@ -258,13 +303,7 @@ def main() -> int:
                 continue
             logp = token_logps(model, ids, torch)
             mask = weights != 0
-            if a.objective == "sft":
-                loss = -(weights * logp).sum() / mask.sum()
-            else:   # REINFORCE with group-relative advantages + per-token KL to the reference
-                with torch.no_grad(), model.disable_adapter():
-                    ref = token_logps(model, ids, torch)
-                kl = (logp - ref)[mask].mean()
-                loss = -(weights * logp)[mask].mean() + a.kl_beta * kl
+            loss = -(weights * logp).sum() / mask.sum()   # sft
         (loss / a.grad_accum).backward()
         running += float(loss)
         _maybe_step(step)

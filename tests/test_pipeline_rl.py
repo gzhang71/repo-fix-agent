@@ -164,7 +164,7 @@ def test_rollout_group_and_export():
     assert {e.group_id for e in eps} == {f"{d.instance_id}@p0"}
     rec = rl.episode_to_record(eps[0], d)
     assert set(rec) == {"instance_id", "group_id", "messages", "loss_mask", "reward", "advantage_grpo",
-                        "advantage_rloo", "prefix_steps", "resolved"}
+                        "advantage_rloo", "prefix_steps", "resolved", "reward_breakdown", "valid_repro"}
     assert len(rec["loss_mask"]) == len(rec["messages"])
     assert [m["role"] for m in rec["messages"][:2]] == ["system", "user"]
     assert all(mask == (m["role"] == "assistant") for m, mask in zip(rec["messages"], rec["loss_mask"]))

@@ -31,7 +31,7 @@ The seed set is close to its ceiling. Add harder instances before relying on sma
 pip install -e '.[teacher,openai]'      # optional extras: embed, voyage, secrets
 cp .env.example .env                    # fill in ANTHROPIC_API_KEY, FIREWORKS_API_KEY (gitignored)
 docker build -f docker/sandbox.Dockerfile -t repo-fix-sandbox:py3.12 docker   # the sandbox
-python -m pytest -q                     # 442 tests, offline (no API calls)
+python -m pytest -q                     # 451 tests, offline (no API calls)
 ```
 
 * Keys load from `.env` automatically; variables already set in your shell win.
@@ -66,16 +66,17 @@ The server listens on localhost only. Anyone who can reach it can push with your
 
 ```bash
 repo-fix validate data/demos/seed.jsonl                       # gold patches flip hidden tests (free)
-repo-fix eval data/demos/seed.jsonl --model claude-opus-5-5 --workers 6 --out runs/baseline/teacher.jsonl
-repo-fix eval data/demos/seed.jsonl --model student --workers 8 --out runs/baseline/student.jsonl
+repo-fix eval data/demos/seed.jsonl --model claude-opus-5-5 --workers 6 --label "teacher baseline"
+repo-fix eval data/demos/seed.jsonl --model student --workers 8 --label "student baseline"
 # noise-aware: mean pass@1 over 3 samples, plus pass@3 (the best-of-n ceiling)
 repo-fix eval runs/splits/dev.jsonl --model student --samples 3 --temperature 0.7
 # best-of-n with the execution reranker (reports chosen vs oracle accuracy)
 repo-fix eval runs/splits/dev.jsonl --model student --best-of 4 --temperature 0.7
 ```
 
-Each run writes per-instance JSONL plus a `.summary.json`: accuracy by difficulty, steps, token
-usage and estimated cost. `--save-rollouts` keeps every episode for training.
+Results go to the run database (below). `--out file.jsonl` additionally writes per-instance JSONL
+plus a `.summary.json`, and `--save-rollouts` writes episodes to a file. Both are optional: the
+database already keeps the results, the summary and every episode (`repo-fix db export`).
 
 **Run database.** Every `eval` is also recorded in `runs/repofix.sqlite` (`$REPOFIX_DB` to move
 it, `--no-db` to skip). It stores:
@@ -112,6 +113,8 @@ external resources, light and dark themes. It shows:
   implies and check them with `scratch_*.py` repro scripts, which never ship in the patch.
 - **`submit_gate`:** one nudge if it submits without running a `scratch_*.py` repro script since
   its last edit. Running the existing tests doesn't count, because its failures pass them.
+- **`step_notice`:** for the last 8 steps, each observation ends with "[N steps left]", so the
+  student can wrap up instead of running out mid-fix. SFT rendering adds the same suffix.
 - **Best-of-n with the execution reranker:** pools every candidate's repro scripts, runs each
   patch against all of them and the test suite, and picks the best. Selection costs no model calls.
 
@@ -143,8 +146,17 @@ The stages, in order:
 11. **`deploy`:** Fireworks on-demand deployment.
 12. **`eval`**
 13. **`post-rollouts`, then `rl-weights`:** pass rates of the fine-tuned student, for the RL curriculum.
-14. **`rl-rollouts`, then `train-rl`:** GRPO-style policy gradient with a KL penalty to the reference,
-    on instances the student solves only sometimes.
+14. **`rl-rollouts`, then `train-rl`:** RL on instances the student solves only sometimes:
+    - **Reward** (`--reward shaped`): 1 if resolved; otherwise 0.5 × the share of target tests
+      passed. A penalty of 0.5 × the share of previously passing tests broken applies either way.
+      +0.1 if one of the student's `scratch_*.py` scripts fails on the base commit and passes on its
+      patch (checked by running it). Scoring uses only the hidden tests.
+    - **Dynamic sampling** (`--dynamic-sampling`): a group whose rewards all tie gives no learning
+      signal, so it's dropped and another instance is drawn.
+    - **Update** (`train_lora.py --objective pg`): a clipped policy gradient. The ratio limit is
+      looser upward (`--clip-low 0.2 --clip-high 0.28`), so rare good tokens can grow, and the loss
+      is averaged per token (`--loss-agg token`), so long episodes aren't diluted. Two passes over
+      each batch, plus a KL penalty to the reference.
 
 **Difficulty weighting** (`repo-fix difficulty-weights`, no model calls). Training effort goes
 where the student's pass rate p is low, not by which model solved an instance:

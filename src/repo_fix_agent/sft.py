@@ -8,15 +8,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .agent import SYSTEM_PROMPT, build_task
+from .agent import SUBMIT_NUDGE, SYSTEM_PROMPT, build_task, steps_left_notice
 from .schema import Demo, iter_demos
 from .tools import TOOLS
 
 
-def render_messages(demo: Demo, system_prompt: str | None = None, reasoning_field: bool = False) -> list[dict]:
+def render_messages(demo: Demo, system_prompt: str | None = None, reasoning_field: bool = False,
+                    step_notice: int = 0, max_steps: int = 40) -> list[dict]:
     """`system_prompt` defaults to SYSTEM_PROMPT; pass the student's (AgentOptions.system_prompt())
     so training matches inference. `reasoning_field` puts each thought in `reasoning_content`
-    (how reasoning students return and receive it) instead of `content`."""
+    (how reasoning students return and receive it) instead of `content`. `step_notice` adds the
+    same "[N steps left]" suffix run_agent shows near the end of a `max_steps` budget (skipped when
+    the observation already carries it, e.g. episodes recorded through run_agent)."""
     msgs: list[dict] = [
         {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
         {"role": "user", "content": build_task(demo.problem_statement, demo.test_cmd)},
@@ -32,7 +35,12 @@ def render_messages(demo: Demo, system_prompt: str | None = None, reasoning_fiel
         if reasoning_field and step.thought:
             msg["reasoning_content"] = step.thought
         msgs.append(msg)
-        msgs.append({"role": "tool", "tool_call_id": call_id, "content": step.observation})
+        obs = step.observation
+        accepted_submit = step.action.tool == "submit" and obs != SUBMIT_NUDGE   # episode over: no notice
+        notice = "" if accepted_submit else steps_left_notice(max_steps - i - 1, step_notice)
+        if notice and not obs.endswith(notice):
+            obs += notice
+        msgs.append({"role": "tool", "tool_call_id": call_id, "content": obs})
     return msgs
 
 

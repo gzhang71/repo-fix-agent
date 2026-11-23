@@ -273,7 +273,7 @@ tr.hl td { background: color-mix(in srgb, var(--series-1) 9%, transparent); }
 
   <div class="grid2">
     <section class="card"><h2>Accuracy across runs</h2>
-      <div class="sub">Resolved share per run, in the order they ran; mean pass@1 for multi-sample runs</div>
+      <div class="sub">Resolved share per run, in the order they ran; mean pass@1 for multi-sample runs. Runs under half this run's size are left out.</div>
       <div class="chart" id="trend"></div><div class="legend" id="trend-legend"></div></section>
     <section class="card"><h2>Accuracy by difficulty</h2>
       <div class="sub" id="diff-sub"></div>
@@ -364,13 +364,15 @@ function yAxis(f, lo, hi, ticks, fmt) {
 // ---- 1. accuracy across runs (line per kind) ----
 function drawTrend() {
   const box = document.getElementById("trend");
-  const runs = D.runs.filter(r => r.accuracy != null);
+  // runs much smaller than the featured one (pilots, --limit smoke runs) would read as full results
+  const runs = D.runs.filter(r => r.accuracy != null && r.n >= L.n / 2);
   const f = frame(box, 240, {l: 40, r: 64, t: 12, b: 28});
   const lo = Math.max(0, Math.floor((Math.min(...runs.map(r => r.accuracy)) * 100 - 6) / 10) / 10), hi = 1;
   const ticks = []; for (let t = lo; t <= hi + 1e-9; t += 0.1) ticks.push(+t.toFixed(2));
   const y = yAxis(f, lo, hi, ticks, t => Math.round(t * 100) + "%");
   const x = i => runs.length === 1 ? (f.x0 + f.x1) / 2 : f.x0 + 12 + i * (f.x1 - f.x0 - 24) / (runs.length - 1);
-  runs.forEach((r, i) => { const t = svgEl("text", {x: x(i), y: f.y0 + 16, "text-anchor": "middle"}); t.textContent = "#" + (i + 1); f.svg.appendChild(t); });
+  const num = r => D.runs.indexOf(r) + 1;   // same numbering as the runs table
+  runs.forEach((r, i) => { const t = svgEl("text", {x: x(i), y: f.y0 + 16, "text-anchor": "middle"}); t.textContent = "#" + num(r); f.svg.appendChild(t); });
   const kinds = [...new Set(runs.map(r => r.kind))].sort((a, b) => (a === "student" ? -1 : b === "student" ? 1 : a.localeCompare(b)));
   const color = k => css(kinds.indexOf(k) === 0 ? "--series-1" : "--series-2");
   const legend = document.getElementById("trend-legend"); legend.replaceChildren();
@@ -393,7 +395,7 @@ function drawTrend() {
     const bx = f.svg.getBoundingClientRect().left; let best = 0, bd = 1e9;
     runs.forEach((r, i) => { const d = Math.abs(ev.clientX - bx - x(i)); if (d < bd) { bd = d; best = i; } });
     const r = runs[best]; hair.setAttribute("x1", x(best)); hair.setAttribute("x2", x(best)); hair.setAttribute("visibility", "visible");
-    showTip(ev, `#${best + 1} · ${r.label}`, [["resolved", pct(r.accuracy)], ["kind", r.kind], ["mean steps", r.mean_steps == null ? "–" : r.mean_steps.toFixed(1)], ["run", r.run_id], ["when", fmtTime(r.created_at)]]);
+    showTip(ev, `#${num(r)} · ${r.label}`, [["resolved", pct(r.accuracy)], ["kind", r.kind], ["mean steps", r.mean_steps == null ? "–" : r.mean_steps.toFixed(1)], ["run", r.run_id], ["when", fmtTime(r.created_at)]]);
   });
   hit.addEventListener("pointerleave", () => { hair.setAttribute("visibility", "hidden"); hideTip(); });
 }
