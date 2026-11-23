@@ -41,3 +41,31 @@ Overlap: 84 solved by both; 14 by the teacher only; 1 by the student only (`seed
    Rerunning the same command replays the cache; set `REPOFIX_LLM_CACHE=off` to resample.
 
 Per-instance results: `runs/baseline/{student,teacher}.jsonl` (gitignored), with summaries next to them.
+
+## 2026-11-23: student baseline v2 (new no-training scaffold, measured)
+
+Same settings as v1: 100 seed instances, temperature 0, Docker sandbox, one sample each.
+Run `20261123-075428-8b10cb` in `runs/repofix.sqlite`.
+
+| | v1 (old scaffold) | v2 (reasoning replay + spec check + submit gate) |
+|---|---|---|
+| Resolved | 85 / 100 | **83 / 100** |
+| easy / medium / hard | 78% / 89% / 86% | 81% / 89% / 71% |
+| Mean steps (solved) | 16.2 | 19.5 |
+| Hit the 40-step limit | 3 | 4 |
+| Fireworks calls | 1,638 | 2,047 |
+
+- **No measurable gain.**
+  - 78 instances were solved by both versions, 5 only by v2, 7 only by v1, and 10 by neither.
+  - Twelve flips out of 100 on one sample each is mostly noise, so 85 vs 83 is not a real
+    difference.
+  - The `seed-002` rewording worked: v2 solves it.
+- **Reasoning replay works:** 100% of turns now carry reasoning (v1: 24%).
+- **The spec check is mostly ignored:**
+  - Only 37 of 100 episodes wrote a `scratch_*` repro script.
+  - 11 of the 17 failures wrote none.
+- **The submit gate never fired.** The student always runs the visible test suite after an edit,
+  which the gate counts as a check. The failures, though, pass the visible tests and fail hidden
+  edge cases, so the gate as designed can't catch them.
+- **Steps:** the scaffold adds about 3 steps per solved episode. Two regressions (`seed-063`,
+  `seed-070`) ran out of steps without submitting.

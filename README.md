@@ -30,7 +30,7 @@ The seed set is close to its ceiling. Add harder instances before relying on sma
 pip install -e '.[teacher,openai]'      # optional extras: embed, voyage, secrets
 cp .env.example .env                    # fill in ANTHROPIC_API_KEY, FIREWORKS_API_KEY (gitignored)
 docker build -f docker/sandbox.Dockerfile -t repo-fix-sandbox:py3.12 docker   # the sandbox
-python -m pytest -q                     # 434 tests, offline (no API calls)
+python -m pytest -q                     # 437 tests, offline (no API calls)
 ```
 
 * Keys load from `.env` automatically; variables already set in your shell win.
@@ -75,6 +75,22 @@ repo-fix eval runs/splits/dev.jsonl --model student --best-of 4 --temperature 0.
 
 Each run writes per-instance JSONL plus a `.summary.json`: accuracy by difficulty, steps, token
 usage and estimated cost. `--save-rollouts` keeps every episode for training.
+
+**Run database.** Every `eval` is also recorded in `runs/repofix.sqlite` (`$REPOFIX_DB` to move
+it, `--no-db` to skip). It stores:
+- **The run:** model, scaffold settings and system-prompt hash, dataset hash, git commit, sampling
+  settings, summary, usage and cost.
+- **Results:** every sample's result.
+- **Episodes:** every full episode (trajectory and patch), so `--save-rollouts` is optional.
+
+```bash
+repo-fix db runs                               # all runs, newest first
+repo-fix db show latest                        # settings + accuracy by difficulty
+repo-fix db compare "student baseline v1 (2026-11-22)" latest   # which instances flipped
+repo-fix db export latest --what episodes --out runs/x/rollouts.jsonl   # pipeline input
+repo-fix eval ... --resume <run>               # continue a crashed run; finished samples are skipped
+repo-fix db import old.jsonl --label ...       # bring in results from before the database
+```
 
 ## Improve the student
 
@@ -178,6 +194,7 @@ src/repo_fix_agent/
   evaluation.py   eval: parallel, multi-sample, best-of-n, cost accounting, rollouts
   llm.py          single-turn TextLLM (Claude / GPT) for pipeline steps
   llm_cache.py    record/replay cache for paid calls
+  rundb.py        run database (runs, results, episodes, instances) + `repo-fix db`
   envfile.py      .env loader
   sft.py          demo -> chat SFT example
   chat_spans.py   chat-template rendering with per-token loss weights (pipeline + train_lora)

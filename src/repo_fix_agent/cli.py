@@ -86,8 +86,35 @@ def cmd_eval(a) -> int:
     out = Path(a.out) if a.out else None
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text("")
+        if not a.resume:
+            out.write_text("")
     lock = __import__("threading").Lock()
+    kind = "student" if a.model.startswith("student") else "teacher"
+    model_id = a.model
+    if a.model.startswith("student"):
+        from .policies import StudentServingConfig
+        model_id = a.model.split(":", 1)[1] if ":" in a.model else StudentServingConfig.load().model_name
+
+    db = run_id = None
+    skip: set[tuple[str, int]] = set()
+    if not a.no_db:
+        from .rundb import RunDB
+
+        db = RunDB(a.db)
+        db.upsert_instances(demos)
+        if a.resume:
+            run_id = db.resolve(a.resume)
+            skip = db.done_keys(run_id)
+            db._exec("UPDATE runs SET status='running' WHERE run_id=?", (run_id,))
+            print(f"resuming run {run_id}: {len(skip)} sample(s) already done", file=sys.stderr)
+        else:
+            run_id = db.start_run(model=model_id, kind=kind, dataset=a.demos, label=a.label, n_instances=len(demos),
+                                  samples=a.samples, best_of=a.best_of, temperature=a.temperature,
+                                  max_steps=a.max_steps, sandbox=_sandbox_desc(a), scaffold=_scaffold(a, factory),
+                                  argv=sys.argv[1:])
+            print(f"run {run_id} -> {db.path}", file=sys.stderr)
+    elif a.resume:
+        raise SystemExit("--resume needs the run database (drop --no-db)")
 
     def on_result(rec):
         with lock:
@@ -95,30 +122,73 @@ def cmd_eval(a) -> int:
             if out:
                 with out.open("a") as f:
                     f.write(json.dumps(rec) + "\n")
+        if db:
+            db.add_result(run_id, rec)
 
-    rollouts_f = Path(a.save_rollouts).open("w") if a.save_rollouts else None
+    rollouts_f = Path(a.save_rollouts).open("a" if a.resume else "w") if a.save_rollouts else None
 
     def on_rollout(demo):
-        with lock:
-            rollouts_f.write(json.dumps(demo.to_dict()) + "\n")
-            rollouts_f.flush()
+        if rollouts_f:
+            with lock:
+                rollouts_f.write(json.dumps(demo.to_dict()) + "\n")
+                rollouts_f.flush()
+        if db:
+            db.add_episode(run_id, demo)
 
-    kind = "student" if a.model.startswith("student") else "teacher"
-    records = evaluate(demos, factory, root, a.max_steps, a.workers, on_result, samples=a.samples,
-                       source=f"{kind}:{a.model}", on_rollout=on_rollout if rollouts_f else None,
-                       best_of=a.best_of)
-    if rollouts_f:
-        rollouts_f.close()
-    model_id = a.model
-    if a.model.startswith("student"):
-        from .policies import StudentServingConfig
-        model_id = a.model.split(":", 1)[1] if ":" in a.model else StudentServingConfig.load().model_name
+    try:
+        records = evaluate(demos, factory, root, a.max_steps, a.workers, on_result, samples=a.samples,
+                           source=f"{kind}:{a.model}", on_rollout=on_rollout if (rollouts_f or db) else None,
+                           best_of=a.best_of, skip=skip)
+    except BaseException:
+        if db:
+            db.finish_run(run_id, status="failed")
+        raise
+    finally:
+        if rollouts_f:
+            rollouts_f.close()
     usage = get_cache().usage.get(model_id) if enabled() else None
+    if db:   # on resume, summarize every sample of the run, not just this session's
+        records = db.results(run_id)
+        prev = (db.run(run_id).get("usage") or {}) if a.resume else {}
+        if prev and usage:
+            usage = {k: (prev.get(k) or 0) + (usage.get(k) or 0) for k in set(prev) | set(usage)}
+        usage = usage or prev or None
     summary = summarize(model_id, records, usage)
     if out:
         out.with_suffix(".summary.json").write_text(json.dumps(summary, indent=2))
+    if db:
+        db.finish_run(run_id, summary, usage)
+        db.close()
     print(format_summary(summary))
+    if run_id:
+        print(f"run {run_id} saved to the run database (repo-fix db show {run_id})")
     return 0
+
+
+def _sandbox_desc(a) -> str:
+    import os
+    return f"{a.sandbox or os.environ.get('REPOFIX_SANDBOX') or 'auto'}:" \
+           f"{a.sandbox_image or os.environ.get('REPOFIX_SANDBOX_IMAGE') or 'repo-fix-sandbox:py3.12'}"
+
+
+def _scaffold(a, factory) -> dict:
+    """What shapes the agent's behaviour, so runs with different scaffolds can be told apart."""
+    import dataclasses
+    import hashlib
+
+    pol = factory()
+    opts = getattr(pol, "agent_options", None)
+    from .agent import AgentOptions
+    opts = opts if isinstance(opts, AgentOptions) else AgentOptions()
+    out = {"policy": type(pol).__name__, "system_prompt_sha": hashlib.sha256(opts.system_prompt().encode()).hexdigest()[:12],
+           "agent_options": dataclasses.asdict(opts)}
+    cfg = getattr(pol, "cfg", None)
+    if cfg is not None and dataclasses.is_dataclass(cfg):
+        out["serving"] = {k: v for k, v in dataclasses.asdict(cfg).items() if "key" not in k}
+    for k in ("effort", "max_tokens"):
+        if hasattr(pol, k):
+            out[k] = getattr(pol, k)
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,6 +228,10 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--limit", type=int, default=None)
     e.add_argument("--ids", default=None, help="comma-separated instance ids")
     e.add_argument("--samples", type=int, default=1, help="episodes per instance (mean pass@1 and pass@k)")
+    e.add_argument("--label", default=None, help="name for this run in the run database")
+    e.add_argument("--db", default=None, help="run database path (default $REPOFIX_DB or runs/repofix.sqlite)")
+    e.add_argument("--no-db", action="store_true", help="don't record this run in the run database")
+    e.add_argument("--resume", default=None, help="continue a run (id/prefix/label): skip samples already done")
     e.add_argument("--best-of", type=int, default=1,
                    help="sample N candidates per instance, pick one with the execution reranker, grade it "
                         "(also reports the oracle: any candidate correct)")
@@ -175,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         importlib.import_module(f".pipeline.{name}", __package__).register(sub)
     importlib.import_module(".web.server", __package__).register(sub)   # repo-fix serve
     importlib.import_module(".llm_cache", __package__).register(sub)    # repo-fix llm-cache
+    importlib.import_module(".rundb", __package__).register(sub)        # repo-fix db
 
     a = p.parse_args(argv)
     if a.sandbox:  # read by make_sandbox(), so every command and pipeline step honours it

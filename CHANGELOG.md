@@ -5,7 +5,30 @@ Every attempt so far, newest first. Each entry says what was tried, what was **m
 Accuracy is "resolved" on the 100 seed demos unless stated; per-instance results are in
 `runs/` (gitignored), and the analysis is in `docs/BASELINE.md`.
 
-## [Unreleased]: student improvements (implemented, not run)
+## [Unreleased]: student improvements
+
+**Measured 2026-11-23** (details in `docs/BASELINE.md`):
+- **Result:** the no-training scaffold scored 83/100 vs 85/100 on one sample each, which is within
+  noise.
+- **What worked:** reasoning replay (reasoning on 100% of turns, from 24%).
+- **What didn't:** the spec check was followed in only 37% of episodes, and the submit gate never
+  fired, because running the visible tests counts as a check.
+- The training items below are still implemented but not run.
+
+### Run database
+- **`runs/repofix.sqlite`:** `eval` records every run. Tables:
+  - `runs`: model, scaffold settings with the system-prompt hash, dataset hash, git commit and
+    dirty flag, sampling settings, status, summary, usage and cost.
+  - `results`: one row per sample.
+  - `episodes`: the full trajectory and patch, compressed.
+  - `instances`: one row per demo.
+- **Writes commit as they happen**, so a crash keeps progress. `eval --resume <run>` skips samples
+  already done and summarizes the whole run.
+- **`repo-fix db runs | show | compare | import | export | delete`:**
+  - `compare` lists the instances that flipped between two runs.
+  - `export` writes results or episodes in the format the pipeline reads.
+- **Imported:** the 2026-11-22 student and teacher baselines, without a git commit, since the code
+  that produced them is unknown.
 
 ### Distillation by teacher signal (implemented, not run)
 - **Question it answers:** a teacher may expose its reasoning, its token log-probs or its full
@@ -69,7 +92,7 @@ Motivation (from the baseline analysis below):
 - **Regressions:** 5 broke a hidden test even though every visible test passed.
 - **Reasoning:** 76% of student turns had no visible reasoning.
 
-No paid API calls were made for this entry; all of it is covered by offline tests (434 passing).
+No paid API calls were made for this entry; all of it is covered by offline tests (437 passing).
 
 ### No training needed
 - **Reasoning replay:** `keep_reasoning`. The student's `reasoning_content` was silently dropped

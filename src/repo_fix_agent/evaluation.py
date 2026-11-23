@@ -39,7 +39,7 @@ def estimate_cost(model: str, usage: dict) -> float | None:
 def evaluate(demos: list[Demo], policy_factory: Callable[[], object], root: str | Path = ".", max_steps: int = 40,
              workers: int = 1, on_result: Callable[[dict], None] | None = None, samples: int = 1,
              source: str = "unknown", on_rollout: Callable[[Demo], None] | None = None,
-             best_of: int = 1) -> list[dict]:
+             best_of: int = 1, skip: set[tuple[str, int]] | None = None) -> list[dict]:
     """One record per (instance, sample). `on_rollout` receives each episode as a Demo with the
     trajectory, patch and metadata (source, parent_id, sample_idx, resolved): the format
     `prefs`, `verifier-train` and on-policy distillation consume."""
@@ -89,7 +89,8 @@ def evaluate(demos: list[Demo], policy_factory: Callable[[], object], root: str 
             on_result(rec)
         return rec
 
-    return pmap(one, [(d, k) for d in demos for k in range(samples)], workers)
+    jobs = [(d, k) for d in demos for k in range(samples) if not skip or (d.instance_id, k) not in skip]
+    return pmap(one, jobs, workers)
 
 
 def summarize(model: str, records: list[dict], usage: dict | None = None) -> dict:
