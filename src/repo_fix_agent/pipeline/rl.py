@@ -363,6 +363,9 @@ def cmd_rl_rollouts(a) -> int:
 
     demos = load_demos(a.demos)
     exclude = load_exclude_ids(a.exclude_ids)
+    if a.max_steps is None:
+        from ..policies import StudentServingConfig
+        a.max_steps = StudentServingConfig.load().max_steps
     try:
         check_not_excluded(demos, exclude, "RL training")
     except ExcludedInstanceError as e:
@@ -427,7 +430,7 @@ def register(subparsers) -> None:
     r.add_argument("--pass-rates", default=None, help="JSON {instance_id: successes out of k (int) or fraction}")
     r.add_argument("--exclude-ids", default=None)
     r.add_argument("--root", default=".")
-    r.add_argument("--max-steps", type=int, default=40)
+    r.add_argument("--max-steps", type=int, default=None, help="default: student.serving.max_steps")
     r.add_argument("--backend", default="auto")
     r.add_argument("--workers", type=int, default=1, help="concurrent episodes (threads)")
     r.add_argument("--reward", choices=["shaped", "binary"], default="shaped",

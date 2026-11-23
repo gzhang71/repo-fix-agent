@@ -42,6 +42,9 @@ def _policy(model: str):
 
 def cmd_fix(a) -> int:
     issue = Path(a.issue_file).read_text() if a.issue_file else a.issue
+    if a.max_steps is None:
+        from .policies import StudentServingConfig
+        a.max_steps = StudentServingConfig.load().max_steps if a.model.startswith("student") else 40
     with RepoEnv(a.repo) as env:
         res = run_agent(_policy(a.model), env, issue, a.test_cmd, a.max_steps)
     print(res.patch or "(no changes)")
@@ -78,6 +81,9 @@ def cmd_eval(a) -> int:
         from .policies import StudentServingConfig
         if StudentServingConfig.load().temperature == 0:
             raise SystemExit("--samples > 1 needs sampling: pass --temperature (e.g. 0.7) for the student")
+    if a.max_steps is None:
+        from .policies import StudentServingConfig
+        a.max_steps = StudentServingConfig.load().max_steps if a.model.startswith("student") else 40
     factory = lambda: make_policy(a.model, a.temperature)  # noqa: E731
     try:
         factory()  # fail fast on an unknown model id
@@ -217,7 +223,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--issue-file")
     f.add_argument("--test-cmd", default=None)
     f.add_argument("--model", default="claude-opus-5-5")
-    f.add_argument("--max-steps", type=int, default=40)
+    f.add_argument("--max-steps", type=int, default=None,
+                   help="step budget (default: student.serving.max_steps for the student, 40 for teachers)")
     f.add_argument("--apply", action="store_true", help="apply the resulting diff to --repo")
     f.set_defaults(fn=cmd_fix)
 
@@ -230,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("demos")
     e.add_argument("--model", default="claude-opus-5-5")
     e.add_argument("--root", default=None)
-    e.add_argument("--max-steps", type=int, default=40)
+    e.add_argument("--max-steps", type=int, default=None,
+                   help="step budget (default: student.serving.max_steps for the student, 40 for teachers)")
     e.add_argument("--workers", type=int, default=1, help="instances evaluated concurrently")
     e.add_argument("--out", default=None, help="per-instance JSONL (+ .summary.json next to it)")
     e.add_argument("--limit", type=int, default=None)

@@ -7,6 +7,17 @@ Accuracy is "resolved" on the 100 seed demos unless stated; per-instance results
 
 ## [Unreleased]: student improvements
 
+**Measured 2026-11-23, v4** (`20261123-084357-10f3f2`): the **steps-left notice** scored 86/100,
+vs 88 for v3.
+- **Paired comparison:** only episodes over 32 steps could change.
+- **Result:** 2 instances fixed, 4 newly failed, and running out of steps went from 3 to 4. The
+  student mostly ignores the countdown.
+- **Response:**
+  - `step_notice` is now **off** (0).
+  - The student's step budget is raised to **50** (`student.serving.max_steps`). It's the default
+    for `eval`, `fix` and `rl-rollouts` with the student; teachers keep 40.
+  - The next baseline measures the 50-step budget.
+
 **Measured 2026-11-23, v3** (`20261123-081218-7a82b0`): with the **repro-only submit gate**, the
 student scored **88/100**, vs 83 for v2 and 85 for v1.
 - **The gate:** only running a `scratch_*.py` script after the last edit counts as a check now.

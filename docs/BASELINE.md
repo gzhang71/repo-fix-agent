@@ -92,3 +92,22 @@ the last edit as a check. Running the existing suite no longer counts. Run `2026
   measure absolute accuracy.
 - **What's left:** "broke a passing test" (5) is now the largest failure mode, followed by
   running out of steps (3).
+
+## 2026-11-23: student baseline v4 (steps-left notice, measured)
+
+The only change from v3: "[N steps left]" on observations during the last 8 steps of the 40-step
+budget. Run `20261123-084357-10f3f2`.
+
+| | v3 | v4 |
+|---|---|---|
+| Resolved | 88 | 86 |
+| easy / medium / hard | 84 / 91 / 86% | 84 / 89 / 81% |
+| Ran out of steps | 3 | 4 |
+| Episodes over 32 steps | 15 | 14 |
+
+- **Paired comparison:** the notice can only change episodes that reach step 33, so the other
+  episodes replay v3's cached responses.
+- **Flips:** 2 fixed (`seed-023`, `seed-068`), 4 newly failed (`seed-037`, `051`, `063`, `094`).
+- **Conclusion:** no sign the countdown helps; the student keeps working rather than wrapping up.
+- **Response:** the notice is off, and the student's budget is raised from 40 to 50 steps
+  (`student.serving.max_steps`).

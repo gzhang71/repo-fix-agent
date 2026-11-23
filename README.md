@@ -25,6 +25,115 @@ repro-only submit gate took the student from 85% to 88% and cut partial fixes fr
 training steps in CHANGELOG "Unreleased" are implemented and tested offline but not yet run.
 The seed set is close to its ceiling. Add harder instances before relying on small gains.
 
+## Architecture
+
+Three loops share one agent runtime:
+- **Fix** (`fix`, `serve`): fix bugs in a real repository and open PRs.
+- **Evaluate** (`eval`): measure a model on demos with hidden tests, record the run and update
+  the dashboard.
+- **Train** (`student-train`): turn teacher runs, student runs and engineer demos into training
+  data for the student, then measure it again.
+
+```mermaid
+flowchart LR
+    demos["Engineer demos<br/>+ seed set (100)"]
+    gh["GitHub repo URL<br/>(web UI)"]
+    subgraph models["Models (every call through the LLM cache)"]
+        teacher["Teacher<br/>Claude Opus 5.5"]
+        student["Student<br/>Fireworks / vLLM"]
+    end
+    runtime["Agent runtime<br/>run_agent + tools<br/>Docker sandbox"]
+    grader["Grader<br/>hidden tests"]
+    pr["Pull requests"]
+    db[("Run database<br/>runs/repofix.sqlite")]
+    dash["Backtest dashboard<br/>runs/dashboard.html"]
+    pipeline["Training pipeline<br/>student-train"]
+    trainer["train_lora.py<br/>GPU box"]
+
+    demos --> runtime
+    gh --> runtime
+    models <--> runtime
+    runtime -- "patch" --> grader
+    runtime -- "verified fixes" --> pr
+    grader -- "results + episodes" --> db
+    db --> dash
+    db -- "rollouts, pass rates" --> pipeline
+    pipeline -- "SFT / DPO / RL data" --> trainer
+    trainer -- "fine-tuned student" --> student
+```
+
+### One episode
+
+Teacher and student run the same loop. The student's options (spec-check prompt, submit gate,
+step budget, reasoning replay) come from `configs/models.yaml`. The same options are used
+when rendering SFT data and in the RL environment, so training matches inference.
+
+```mermaid
+flowchart TD
+    task["Issue text + test command"] --> policy["Policy.act()<br/>teacher or student"]
+    policy -- "tool call" --> gate{"submit without a<br/>scratch repro run?"}
+    gate -- "yes, first time" --> nudge["Nudge observation:<br/>write and run a repro"]
+    gate -- "no" --> tools["Tools: bash, view_file, str_replace,<br/>create_file, search, run_tests, submit"]
+    tools --> sandbox["Sandbox<br/>Docker, no network, limits"]
+    sandbox --> obs["Observation"]
+    nudge --> obs
+    obs --> policy
+    tools -- "submit" --> diff["git diff<br/>excludes tests and scratch_* files"]
+    diff --> grade["Grader: fresh sandbox, patch applied,<br/>hidden test_patch applied last"]
+    grade --> result["FAIL_TO_PASS / PASS_TO_PASS<br/>resolved?"]
+```
+
+Every model call goes through the LLM cache (`llm_cache.py`). A repeated request replays the
+recorded response, which is why a scaffold change can be measured as a paired comparison. The
+hidden tests are applied only after the agent finishes, so it can neither see nor edit them.
+
+### Training round
+
+`repo-fix student-train` prints this plan with a cost per stage and runs one stage at a time.
+Paid stages need `--yes`. Which distillation stages appear depends on what the teacher exposes
+(`repo-fix distill-signal`): with Claude it uses reasoning relabels; a same-tokenizer teacher
+adds the `token-distill` + `tokenkl` or `gkd` stages.
+
+```mermaid
+flowchart TD
+    split["split<br/>frozen test set, repo-disjoint"] --> roll["student-rollouts<br/>4 samples per instance"]
+    roll --> weights["weights<br/>pass rate p: gap / learning / mastered / unsolved"]
+    weights --> distill["distill<br/>teacher runs where p ≤ 0.75"]
+    weights --> onpol["onpolicy<br/>teacher relabels the student's states"]
+    aug["augment<br/>synthetic bugs"] --> dsyn["distill-synthetic<br/>teacher runs on them"]
+    distill --> mix["sft-mix<br/>weight = max(0.2, 1 − p), edge cases ×2"]
+    dsyn --> mix
+    onpol --> mix
+    roll -- "student's own successes" --> mix
+    aux["aux tasks"] --> mix
+    distill --> prefs["prefs<br/>DPO pairs"]
+    onpol --> prefs
+    mix --> sft["train-sft"] --> dpo["train-dpo"]
+    prefs --> dpo
+    dpo --> deploy["deploy"] --> evalr["eval<br/>dev split"]
+    deploy --> post["post-rollouts → rl-weights"]
+    post --> rl["rl-rollouts<br/>shaped reward, repro bonus,<br/>dynamic sampling"]
+    rl --> trl["train-rl<br/>clipped PG, token-level loss"]
+    trl -. "next round" .-> roll
+```
+
+### Where things live
+
+| Concern | Module |
+|---|---|
+| Agent loop, prompts, submit gate, optional steps-left notice | `agent.py` |
+| Action space | `tools.py` |
+| Sandboxes (Docker / local) and an episode's repo copy | `sandbox.py`, `env.py` |
+| Teacher and student policies, serving config | `policies.py` |
+| Grading with hidden tests | `grader.py` |
+| Evaluation, run database, dashboard | `evaluation.py`, `rundb.py`, `dashboard.py` |
+| Cost control | `llm_cache.py`, `envfile.py` |
+| Data pipeline and training stages | `pipeline/` (one module per stage; see [Data pipeline](#data-pipeline-engineer-demos)) |
+| RL environment and rewards | `pipeline/rl.py`, `pipeline/rl_rewards.py` |
+| Distillation mode by teacher signal | `pipeline/teacher_signal.py`, `chat_spans.py` |
+| Training (SFT, DPO, PG, tokenkl, GKD) | `scripts/train_lora.py` |
+| Web UI: clone, environment, bugs, fixes, PRs | `web/` |
+
 ## Setup
 
 ```bash
@@ -113,8 +222,9 @@ external resources, light and dark themes. It shows:
   implies and check them with `scratch_*.py` repro scripts, which never ship in the patch.
 - **`submit_gate`:** one nudge if it submits without running a `scratch_*.py` repro script since
   its last edit. Running the existing tests doesn't count, because its failures pass them.
-- **`step_notice`:** for the last 8 steps, each observation ends with "[N steps left]", so the
-  student can wrap up instead of running out mid-fix. SFT rendering adds the same suffix.
+- **Step budget:** the student gets 50 steps (`max_steps` in `models.yaml`; teachers keep 40).
+  A "[N steps left]" countdown (`step_notice`) is available but off, because baseline v4 showed no
+  gain from it.
 - **Best-of-n with the execution reranker:** pools every candidate's repro scripts, runs each
   patch against all of them and the test suite, and picks the best. Selection costs no model calls.
 

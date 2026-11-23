@@ -134,10 +134,11 @@ def test_notice_in_run_agent_and_rl_env(pag):
     assert ep.breakdown["truncated"] and not ep.submitted
 
 
-def test_student_config_enables_notice():
+def test_student_config_notice_off_and_50_steps():
     from repo_fix_agent.policies import StudentServingConfig
     cfg = StudentServingConfig.load(ROOT / "configs/models.yaml")
-    assert cfg.step_notice == 8 and cfg.agent_options().step_notice == 8
+    assert cfg.step_notice == 0 and cfg.agent_options().step_notice == 0     # off after baseline v4
+    assert cfg.max_steps == 50
 
 
 def test_plan_uses_new_rl_settings(tmp_path):
